@@ -1,3 +1,38 @@
+> [!NOTE]
+> **Fork of [OpenHands/OpenHands](https://github.com/OpenHands/OpenHands) (Agent Canvas v1.34.0): Docker conversations can use host folders, a new Docker Worktree mode, and an "Allow local conversations" setting.**
+>
+> Branch `fix/canvas-docker-host-workspace-v1.34.0` (base tag `v1.34.0`). The older `fix/canvas-docker-host-workspace-v1.29.0` branch carries the first version of the host-folder change.
+>
+> **Workspace modes in the home launcher**
+>
+> | Mode            | Runs      | Workspace                                                                | Folder hooks                 | Offered when                                                                                                        |
+> | --------------- | --------- | ------------------------------------------------------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+> | Local           | host      | picked folder                                                            | yes                          | the server offers local runs and "Allow local conversations" is on                                                  |
+> | Worktree        | host      | new git worktree of the folder                                           | yes                          | same as Local, folder picked                                                                                        |
+> | Docker          | container | picked folder at `/workspace`; an empty private folder if none is picked | yes, when a folder is picked | the server offers Docker (hybrid or Docker-only)                                                                    |
+> | Docker Worktree | container | new git worktree of the folder                                           | yes                          | the server offers Docker, a folder is picked, agent-server >= 1.61.0; shown disabled when the folder has no commits |
+>
+> **Agent-server requirements**
+>
+> - Agent-server >= 1.57.0 (the Canvas version check). Docker Worktree needs >= 1.61.0; on older servers it is not offered and no Canvas request sends `worktree: true` to a container.
+> - Hybrid (host and Docker): `OH_CONVERSATION_RUNTIME_SELECTABLE=true`, a reachable Docker daemon and `OH_SECRET_KEY`. Docker-only: `OH_CONVERSATION_RUNTIME=docker`.
+>
+> **"Allow local conversations"** (Settings > Runtime, shown only on a local backend whose agent-server offers both host and Docker runs)
+>
+> - Stored with the other Canvas preferences in the agent-server settings (`misc_settings.app_preferences.allow_local_conversations`); not set means on.
+> - When off, every conversation started from this Canvas runs in Docker: launcher, sidebar menu, `/launch` links, profile switch, skill restart, children and planners. The `local` and `worktree` default-runtime choices are hidden unless one of them is already saved.
+> - It is a Canvas preference, not a server control: direct API callers and the automation service can still start host conversations. Anyone holding the session key can change it.
+>
+> **Children and planners**: a child or planner of a Docker conversation (or any conversation on a Docker-only server) is refused, so it can never move to the host. A child or planner of a host conversation is refused while local conversations are off.
+>
+> **Worktree options**: the saved `worktree_base`, `worktree_base_ref` and `worktree_branch_prefix` also apply to Docker Worktree. They are hidden in Settings > Runtime while local conversations are off.
+>
+> **Security trade-offs**
+>
+> - The picked folder is mounted read-write. In Docker Worktree mode the repository root and its git common dir are mounted read-write too. Code in the container can therefore plant files that run on the host later: `.git/config` (`core.fsmonitor`, `core.hooksPath`), `.git/hooks/*`, and `.openhands/hooks.json` plus hook scripts (run by the next Local or Worktree conversation on that folder). Upstream hybrid Docker mode has the same exposure.
+> - Folder hooks run inside the container, not on the host. They fail open: only exit code 2 blocks an action; a missing script or interpreter in the container (exit 127) lets the action proceed.
+> - Any absolute host path can be mounted, including `/` or `~/.ssh`; the folder picker is the only guard (as upstream).
+
 <a name="readme-top"></a>
 
 <div align="center">
