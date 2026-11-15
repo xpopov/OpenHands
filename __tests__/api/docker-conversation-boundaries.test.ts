@@ -12,6 +12,7 @@ import { clearCachedAgentServerInfo } from "#/api/agent-server-compatibility";
 import { clearAgentServerHomeDirCache } from "#/api/agent-server-home";
 import {
   requireConversationServerInfo,
+  resolveConversationHooksProjectDir,
   resolveNewConversationWorkspace,
 } from "#/api/conversation-workspace";
 import SettingsService from "#/api/settings-service/settings-service.api";
@@ -130,20 +131,71 @@ describe("conversation runtime boundaries", () => {
     expect(paths).toEqual(["/server_info"]);
   });
 
-  it("lists no hooks for an isolated conversation without reading host hooks", async () => {
+  it("lists no hooks for an isolated conversation without a folder", async () => {
     expect(await AgentServerConversationService.getHooks(cid)).toEqual({
       hooks: [],
     });
     expect(paths).toEqual(["/server_info"]);
   });
 
-  it.each(["/home/user/project", "/workspace", "relative/project"])(
-    "rejects selected host folder %s rather than discarding it",
-    async (workingDir) => {
-      await expect(resolveWorkspace({ workingDir })).rejects.toThrow(
-        i18n.t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE),
-      );
-      expect(paths).toEqual(["/server_info"]);
+  it.each([
+    ["/home/user/project", "/home/user/project"],
+    ["relative/project", "/home/agent/relative/project"],
+  ])(
+    "mounts selected host folder %s and reads its hooks",
+    async (workingDir, absolute) => {
+      expect(await resolveWorkspace({ workingDir })).toEqual({
+        workingDir: absolute,
+        hooksProjectDir: absolute,
+        isolated: true,
+      });
+    },
+  );
+
+  it.each([true, false])(
+    "refuses /workspace as a container folder (isolated server: %s)",
+    async (serverIsolated) => {
+      isolated = serverIsolated;
+      await expect(
+        resolveWorkspace({ workingDir: "/workspace", inContainer: true }),
+      ).rejects.toThrow(i18n.t(I18nKey.HOME$DOCKER_WORKSPACE_PATH_RESERVED));
+    },
+  );
+
+  it("reads hooks from the folder of a container run on a hybrid server", async () => {
+    isolated = false;
+    expect(
+      await resolveWorkspace({
+        workingDir: "/home/user/project",
+        inContainer: true,
+      }),
+    ).toEqual({
+      workingDir: "/home/user/project",
+      hooksProjectDir: "/home/user/project",
+      isolated: false,
+    });
+  });
+
+  it("reads no hooks for a container run without a folder on a hybrid server", async () => {
+    isolated = false;
+    expect(
+      (await resolveWorkspace({ inContainer: true })).hooksProjectDir,
+    ).toBeNull();
+  });
+
+  it.each([
+    ["/home/user/project", true, true, "/home/user/project"],
+    ["/home/user/project", false, true, "/home/user/project"],
+    [null, true, false, null],
+    [null, false, true, null],
+    ["/workspace", false, true, null],
+  ] as const)(
+    "resolves the hooks dir of %s (container %s, isolated server %s)",
+    async (folder, inContainer, serverIsolated, expected) => {
+      isolated = serverIsolated;
+      expect(
+        await resolveConversationHooksProjectDir(folder, inContainer),
+      ).toBe(expected);
     },
   );
 

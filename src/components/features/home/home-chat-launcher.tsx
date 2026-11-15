@@ -31,9 +31,10 @@ import {
 import { getApiErrorMessage } from "#/utils/api-error-message";
 import { getWorkspacesUnsupportedMessage } from "#/utils/workspaces-compatibility";
 import {
-  DEFAULT_WORKSPACE_MODE,
+  ALL_WORKSPACE_MODES,
   getDefaultWorkspaceMode,
   getWorkspaceModeOptions,
+  isContainerWorkspaceMode,
   readStoredLocalWorkspaceMode,
   writeStoredLocalWorkspaceMode,
 } from "#/utils/workspace-mode";
@@ -75,13 +76,6 @@ export function HomeChatLauncher() {
   const [lastUsedWorkspaceMode] = useState(readStoredLocalWorkspaceMode);
   const [pickedWorkspaceMode, setPickedWorkspaceMode] =
     useState<WorkspaceMode | null>(null);
-  // Picked here > Settings → Runtime default > last used in this browser.
-  const workspaceMode =
-    pickedWorkspaceMode ??
-    getDefaultWorkspaceMode(
-      isLocal ? settings?.conversation_settings?.default_runtime : null,
-      lastUsedWorkspaceMode,
-    );
   const isRecommendedAutomationsDismissed =
     useHomeRecommendedAutomationsDismissed();
   const [selectedPlugins, setSelectedPlugins] = useState<PluginSpec[]>([]);
@@ -124,21 +118,30 @@ export function HomeChatLauncher() {
   const { error: workspacesError } = useLocalWorkspaces({ enabled: isLocal });
   const {
     isolated,
-    dockerSelectable,
+    dockerAvailable,
     serverInfoLoading,
     unsupportedMessage: runtimeWorkspaceMessage,
   } = useConversationWorkspace();
-  const workspaceModes = getWorkspaceModeOptions(
-    dockerSelectable,
-    !isLocal || !!pendingWorkspace,
-  );
-  // A remembered mode the server no longer offers falls back, but only once
-  // server_info has answered: a pending probe must not silently turn a Docker
-  // choice into Local (a server that cannot run it rejects the start).
+  const workspaceModes = getWorkspaceModeOptions({
+    local: !isolated,
+    docker: dockerAvailable,
+    hasWorkspace: !isLocal || !!pendingWorkspace,
+  });
+  // Picked here > Settings → Runtime default > last used in this browser >
+  // first offered. While server_info is pending the offered modes are
+  // unknown, so a remembered Docker choice is kept rather than turned into
+  // Local (a server that cannot run it rejects the start).
+  const candidateModes = serverInfoLoading
+    ? ALL_WORKSPACE_MODES
+    : workspaceModes;
   const effectiveWorkspaceMode =
-    serverInfoLoading || workspaceModes.includes(workspaceMode)
-      ? workspaceMode
-      : DEFAULT_WORKSPACE_MODE;
+    pickedWorkspaceMode && candidateModes.includes(pickedWorkspaceMode)
+      ? pickedWorkspaceMode
+      : getDefaultWorkspaceMode(
+          isLocal ? settings?.conversation_settings?.default_runtime : null,
+          lastUsedWorkspaceMode,
+          candidateModes,
+        );
   const workspacesUnsupportedMessage =
     runtimeWorkspaceMessage ??
     (isLocal ? getWorkspacesUnsupportedMessage(workspacesError, t) : null);
@@ -178,18 +181,13 @@ export function HomeChatLauncher() {
       automationSetup: isAutomateMode,
       entryPoint: "home_chat_launcher",
     };
-    // An isolated backend owns its workspace, so a host selection left over
-    // from a non-isolated session must not be forwarded: the server rejects it
-    // (`HOME$ISOLATED_WORKSPACE_NOTICE`) and the user sees an error toast for a
-    // selection they may not have noticed. Creation proceeds isolated instead;
-    // the launcher still offers an explicit "clear" affordance for the UI.
-    if (isLocal && pendingWorkspace && !isolated) {
+    if (isLocal && pendingWorkspace) {
       variables = {
         ...variables,
         workingDir: pendingWorkspace.path,
         workspaceMode: effectiveWorkspaceMode,
       };
-    } else if (isLocal && effectiveWorkspaceMode === "docker_container") {
+    } else if (isLocal && isContainerWorkspaceMode(effectiveWorkspaceMode)) {
       // No workspace: the container gets its own, so only the runtime is sent.
       variables = { ...variables, workspaceMode: effectiveWorkspaceMode };
     } else if (!isLocal && pendingRepository && pendingBranch) {
@@ -364,7 +362,7 @@ export function HomeChatLauncher() {
         {isolated && (
           <p role="status" className="text-xs text-text-secondary">
             {pendingWorkspace
-              ? runtimeWorkspaceMessage
+              ? t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE)
               : t(I18nKey.HOME$ISOLATED_WORKSPACE_NEW)}
             {pendingWorkspace && (
               <button
@@ -409,7 +407,7 @@ export function HomeChatLauncher() {
               disabledTooltip={workspacesUnsupportedMessage}
             />
           )}
-          {isLocal && !hasSelection && workspaceModes.length > 0 ? (
+          {isLocal && !hasSelection && workspaceModes.length > 1 ? (
             <WorkspaceModeSelector
               value={effectiveWorkspaceMode}
               options={workspaceModes}

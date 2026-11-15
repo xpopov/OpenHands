@@ -157,6 +157,18 @@ describe("home git selection preview", () => {
     expect(props.onWorkspaceModeChange).toHaveBeenCalledWith("new_worktree");
   });
 
+  it("hides the mode selector when only one mode is offered", () => {
+    render(
+      <HomeGitControlBarPreview
+        {...createPreviewProps({ workspaceModes: ["docker_container"] })}
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("workspace-mode-preview"),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps only the repository control when there is no selection", () => {
     render(
       <HomeGitControlBarPreview

@@ -45,7 +45,7 @@ export function HomeGitControlBarPreview({
         workspaceName={workspaceName}
         onClick={onRepoClick}
       />
-      {workspace ? (
+      {workspace && workspaceModes.length > 1 ? (
         <WorkspaceModeSelector
           value={workspaceMode}
           options={workspaceModes}

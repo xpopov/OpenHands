@@ -373,7 +373,8 @@ describe("HomeChatLauncher", () => {
     });
     mockUseConversationWorkspace.mockImplementation(() => ({
       isolated: mockIsolated,
-      unsupportedMessage: mockIsolated ? "isolated-unsupported" : null,
+      dockerAvailable: mockIsolated,
+      unsupportedMessage: null,
     }));
     enqueueHomeTaskPendingMessage.mockResolvedValue(undefined);
     sendMessageWithAttachments.mockResolvedValue({
@@ -597,17 +598,9 @@ describe("HomeChatLauncher", () => {
     );
   });
 
-  it("omits a stale host workspace override on an isolated backend", async () => {
-    // A host folder selected while the backend looked like a normal local
-    // backend must not be forwarded once the backend advertises isolation: the
-    // server rejects it and the user sees an error toast for a selection the
-    // launcher already deems unsupported. `isolated` is read per render, so
-    // flipping the mocked value and forcing a re-render models the backend
-    // changing under the user.
-    mockUseConversationWorkspace.mockImplementation(() => ({
-      isolated: mockIsolated,
-      unsupportedMessage: mockIsolated ? "isolated-unsupported" : null,
-    }));
+  it("moves a host-mode pick to Docker when the backend turns Docker-only", async () => {
+    // `isolated` is read per render, so flipping the mocked value and forcing
+    // a re-render models the backend changing under the user.
     const createSpy = vi
       .spyOn(AgentServerConversationService, "createConversation")
       .mockResolvedValue(
@@ -630,8 +623,8 @@ describe("HomeChatLauncher", () => {
     expect(createSpy.mock.calls[0]?.[0]).toMatchObject({
       initialUserMsg: "hello world",
       metadata: null,
-      workingDirOverride: undefined,
-      workspaceMode: undefined,
+      workingDirOverride: "/p/app",
+      workspaceMode: "docker_container",
     });
   });
 
@@ -676,7 +669,7 @@ describe("HomeChatLauncher", () => {
   it("starts a Docker conversation when the server offers Docker", async () => {
     mockUseConversationWorkspace.mockReturnValue({
       isolated: false,
-      dockerSelectable: true,
+      dockerAvailable: true,
       unsupportedMessage: null,
     });
     const createSpy = vi
@@ -732,7 +725,7 @@ describe("HomeChatLauncher", () => {
     });
     mockUseConversationWorkspace.mockReturnValue({
       isolated: false,
-      dockerSelectable: true,
+      dockerAvailable: true,
       unsupportedMessage: null,
     });
     renderLauncher();
@@ -753,7 +746,7 @@ describe("HomeChatLauncher", () => {
   it("offers Local or Docker before a workspace is opened", async () => {
     mockUseConversationWorkspace.mockReturnValue({
       isolated: false,
-      dockerSelectable: true,
+      dockerAvailable: true,
       unsupportedMessage: null,
     });
     const createSpy = vi
@@ -790,7 +783,7 @@ describe("HomeChatLauncher", () => {
     writeStoredLocalWorkspaceMode("docker_container");
     mockUseConversationWorkspace.mockReturnValue({
       isolated: false,
-      dockerSelectable: false,
+      dockerAvailable: false,
       serverInfoLoading: true,
       unsupportedMessage: null,
     });
@@ -1213,5 +1206,102 @@ describe("HomeChatLauncher", () => {
     expect(
       screen.queryByTestId("recommended-automations-rail"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("HomeChatLauncher on a Docker-only server", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockImages = [];
+    mockFiles = [];
+    mockUseActiveBackend.mockReturnValue(localBackend);
+    mockUseLlmConfigured.mockReturnValue({
+      isConfigured: true,
+      isLoading: false,
+    });
+    mockUseConversationWorkspace.mockReturnValue({
+      isolated: true,
+      dockerSelectable: false,
+      dockerAvailable: true,
+      unsupportedMessage: null,
+    });
+    sendMessageWithAttachments.mockResolvedValue({
+      text: "hello world",
+      content: "hello world",
+      imageUrls: [],
+      fileUrls: [],
+      timestamp: "2020-01-01T00:00:00.000Z",
+    });
+    window.localStorage.removeItem(LAST_LOCAL_WORKSPACE_MODE_STORAGE_KEY);
+    vi.spyOn(WorkspacesService, "listWorkspaces").mockResolvedValue({
+      workspaces: [],
+      workspaceParents: [],
+    });
+    vi.spyOn(AutomationService, "checkHealth").mockResolvedValue({
+      status: "ok",
+    });
+    vi.spyOn(AutomationService, "getAutomations").mockResolvedValue({
+      automations: [],
+      total: 0,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    toast.remove();
+    window.localStorage.removeItem(LAST_LOCAL_WORKSPACE_MODE_STORAGE_KEY);
+  });
+
+  it("mounts a picked folder in Docker", async () => {
+    writeStoredLocalWorkspaceMode("new_worktree");
+    const createSpy = vi
+      .spyOn(AgentServerConversationService, "createConversation")
+      .mockResolvedValue(
+        makeConversationResponse({ app_conversation_id: "conv-mount" }),
+      );
+    renderLauncher();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByTestId("open-workspace-button"));
+    await user.click(
+      await screen.findByTestId("stub-workspace-dialog-confirm"),
+    );
+    expect(screen.getByTestId("stub-workspace-modes")).toHaveTextContent(
+      /^docker_container$/,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "HOME$ISOLATED_WORKSPACE_NOTICE",
+    );
+    await user.click(screen.getByTestId("stub-chat-submit"));
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
+    expect(createSpy.mock.calls[0]?.[0]).toMatchObject({
+      workingDirOverride: "/p/app",
+      workspaceMode: "docker_container",
+    });
+  });
+
+  it("starts an empty sandbox without a mode selector", async () => {
+    const createSpy = vi
+      .spyOn(AgentServerConversationService, "createConversation")
+      .mockResolvedValue(
+        makeConversationResponse({ app_conversation_id: "conv-sandbox" }),
+      );
+    renderLauncher();
+    const user = userEvent.setup();
+
+    expect(
+      screen.queryByTestId("workspace-mode-selector"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "HOME$ISOLATED_WORKSPACE_NEW",
+    );
+    await user.click(screen.getByTestId("stub-chat-submit"));
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
+    expect(createSpy.mock.calls[0]?.[0]).toMatchObject({
+      workingDirOverride: undefined,
+      workspaceMode: "docker_container",
+    });
   });
 });

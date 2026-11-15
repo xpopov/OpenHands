@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceMode } from "#/api/conversation-metadata-store";
 import {
+  getDefaultWorkspaceMode,
+  getWorkspaceModeOptions,
   isContainerWorkspaceMode,
   isWorkspaceMode,
   isWorktreeWorkspaceMode,
@@ -179,6 +181,52 @@ describe("planConversationRuntime", () => {
                 false,
               );
             }
+  });
+});
+
+describe("getWorkspaceModeOptions", () => {
+  it.each([
+    [true, true, true, ["local_repo", "new_worktree", "docker_container"]],
+    [true, false, true, ["local_repo", "new_worktree"]],
+    [false, true, true, ["docker_container"]],
+    [false, false, true, []],
+    [true, true, false, ["local_repo", "docker_container"]],
+    [true, false, false, []],
+    [false, true, false, ["docker_container"]],
+    [false, false, false, []],
+  ] as const)(
+    "local=%s docker=%s folder=%s offers %j",
+    (local, docker, hasWorkspace, expected) => {
+      expect(getWorkspaceModeOptions({ local, docker, hasWorkspace })).toEqual(
+        expected,
+      );
+    },
+  );
+});
+
+describe("getDefaultWorkspaceMode", () => {
+  it.each([
+    ["docker", "new_worktree", ALL_MODES, "docker_container"],
+    ["local", "new_worktree", ALL_MODES, "local_repo"],
+    ["docker", "new_worktree", HOST_MODES, "new_worktree"],
+    [undefined, "new_worktree", ALL_MODES, "new_worktree"],
+    ["toString", "new_worktree", ALL_MODES, "new_worktree"],
+    ["local", "new_worktree", ["docker_container"], "docker_container"],
+    [null, "local_repo", ["docker_container"], "docker_container"],
+    [null, "docker_container", [], "local_repo"],
+  ] as const)(
+    "saved %s, last used %s, offered %j -> %s",
+    (saved, lastUsed, options, expected) => {
+      expect(getDefaultWorkspaceMode(saved, lastUsed, options)).toBe(expected);
+    },
+  );
+
+  it("skips disabled modes", () => {
+    expect(
+      getDefaultWorkspaceMode("docker", "docker_container", ALL_MODES, [
+        "docker_container",
+      ]),
+    ).toBe("local_repo");
   });
 });
 

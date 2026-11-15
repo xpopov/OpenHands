@@ -162,7 +162,7 @@
     "id": "Menampilkan {{count}} file pertama. Pohon ini tidak lengkap. Sesuaikan Penemuan file untuk melihat lebih banyak."
   },
   "HOME$ISOLATED_WORKSPACE_NEW": {
-    "en": "New isolated workspace",
+    "en": "New empty sandbox (/workspace)",
     "ja": "新しい分離ワークスペース",
     "zh-CN": "新建隔离工作区",
     "zh-TW": "建立隔離工作區",
@@ -34650,7 +34650,7 @@
     "id": "Pratinjau gambar ukuran penuh"
   },
   "HOME$ISOLATED_WORKSPACE_NOTICE": {
-    "en": "This backend uses isolated workspaces. Host folders and projects cannot be attached.",
+    "en": "Docker runtime: host folders you pick are mounted at /workspace.",
     "ja": "このバックエンドは分離ワークスペースを使用します。ホストのフォルダーやプロジェクトは接続できません。",
     "zh-CN": "此后端使用隔离工作区，无法附加主机文件夹或项目。",
     "zh-TW": "此後端使用隔離工作區，無法附加主機資料夾或專案。",
@@ -34666,6 +34666,24 @@
     "tr": "Bu arka uç yalıtılmış çalışma alanları kullanır. Ana makine klasörleri ve projeleri eklenemez.",
     "uk": "Цей сервер використовує ізольовані робочі простори. Папки та проєкти хоста підключити неможливо.",
     "id": "Backend ini menggunakan ruang kerja terisolasi. Folder dan proyek host tidak dapat dilampirkan."
+  },
+  "HOME$DOCKER_WORKSPACE_PATH_RESERVED": {
+    "en": "The folder /workspace cannot be attached to a Docker conversation. Pick another folder.",
+    "ja": "フォルダー /workspace は Docker の会話に接続できません。別のフォルダーを選択してください。",
+    "zh-CN": "无法将文件夹 /workspace 附加到 Docker 对话。请选择其他文件夹。",
+    "zh-TW": "無法將資料夾 /workspace 附加到 Docker 對話。請選擇其他資料夾。",
+    "ko-KR": "/workspace 폴더는 Docker 대화에 연결할 수 없습니다. 다른 폴더를 선택하세요.",
+    "no": "Mappen /workspace kan ikke knyttes til en Docker-samtale. Velg en annen mappe.",
+    "ar": "لا يمكن إرفاق المجلد /workspace بمحادثة Docker. اختر مجلدًا آخر.",
+    "de": "Der Ordner /workspace kann keiner Docker-Unterhaltung zugeordnet werden. Wählen Sie einen anderen Ordner.",
+    "fr": "Le dossier /workspace ne peut pas être associé à une conversation Docker. Choisissez un autre dossier.",
+    "it": "La cartella /workspace non può essere collegata a una conversazione Docker. Scegli un'altra cartella.",
+    "pt": "A pasta /workspace não pode ser anexada a uma conversa Docker. Escolha outra pasta.",
+    "es": "La carpeta /workspace no se puede adjuntar a una conversación de Docker. Elige otra carpeta.",
+    "ca": "La carpeta /workspace no es pot adjuntar a una conversa de Docker. Tria una altra carpeta.",
+    "tr": "/workspace klasörü bir Docker konuşmasına eklenemez. Başka bir klasör seçin.",
+    "uk": "Папку /workspace не можна підключити до розмови Docker. Виберіть іншу папку.",
+    "id": "Folder /workspace tidak dapat dilampirkan ke percakapan Docker. Pilih folder lain."
   },
   "SETTINGS$AGENT_PROFILE_SECRETS": {
     "en": "Secrets",

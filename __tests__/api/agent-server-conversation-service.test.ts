@@ -1012,8 +1012,10 @@ describe("AgentServerConversationService", () => {
       expect(payload.workspace.working_dir).toBe("/Users/jane/projects/foo");
       expect(payload.worktree).toBe(false);
       expect(payload.conversation_runtime).toBe("docker");
-      // The container cannot see host paths, so no host hooks are loaded.
-      expect(loadWorkspaceHooks).not.toHaveBeenCalled();
+      // The container sees the attached folder, so its hooks apply.
+      expect(loadWorkspaceHooks).toHaveBeenCalledWith(
+        "/Users/jane/projects/foo",
+      );
     });
 
     it("records a docker conversation started without a workspace", async () => {
@@ -1106,6 +1108,36 @@ describe("AgentServerConversationService", () => {
       beforeEach(() => {
         window.localStorage.clear();
         mockLocalCreate();
+      });
+
+      it("mounts a picked folder with its hooks on a Docker-only server", async () => {
+        useServerInfo(DOCKER_ONLY_SERVER_INFO);
+        const hookConfig = {
+          pre_tool_use: [{ matcher: "terminal", hooks: [] }],
+          post_tool_use: [],
+          user_prompt_submit: [],
+          session_start: [],
+          session_end: [],
+          stop: [],
+        };
+        const loadWorkspaceHooks = vi
+          .spyOn(HooksService, "loadWorkspaceHooks")
+          .mockResolvedValue(hookConfig);
+        await AgentServerConversationService.createConversation({
+          agentProfileId: "profile-1",
+          workingDirOverride: "/Users/jane/projects/foo",
+          workspaceMode: "new_worktree",
+        });
+        expect(loadWorkspaceHooks).toHaveBeenCalledWith(
+          "/Users/jane/projects/foo",
+        );
+        expect(postedBody()).toMatchObject({
+          worktree: false,
+          conversation_runtime: "docker",
+          workspace: { working_dir: "/Users/jane/projects/foo" },
+          hook_config: hookConfig,
+          tags: { workspacemode: "docker_container" },
+        });
       });
 
       it.each([undefined, "new_worktree"] as const)(
@@ -2652,6 +2684,23 @@ describe("AgentServerConversationService", () => {
           ],
         });
         // The workspace root, not the per-conversation worktree.
+        expect(projectDirs).toEqual(["/home/user/qa-hooks-repo"]);
+      });
+
+      it("lists the hooks of the folder a Docker conversation mounts", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        setStoredConversationMetadata("conv-1", {
+          selected_repository: null,
+          selected_branch: null,
+          git_provider: null,
+          selected_workspace: "/home/user/qa-hooks-repo",
+          workspace_mode: "docker_container",
+        });
+        const projectDirs = serveWorkspaceHooks({ hook_config: null });
+
+        await expect(
+          AgentServerConversationService.getHooks("conv-1"),
+        ).resolves.toEqual({ hooks: [] });
         expect(projectDirs).toEqual(["/home/user/qa-hooks-repo"]);
       });
 

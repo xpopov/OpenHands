@@ -78,15 +78,18 @@ export async function resolveNewConversationWorkspace(options: {
 }) {
   const clientOptions = getAgentServerClientOptions();
   const { info } = options;
-  if (usesIsolatedWorkspace(info)) {
-    if (options.selectedRepository || options.workingDir !== undefined) {
+  const isolated = usesIsolatedWorkspace(info);
+  if (isolated) {
+    if (options.selectedRepository) {
       throw new Error(i18n.t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE));
     }
-    return {
-      workingDir: ISOLATED_WORKSPACE_DIR,
-      hooksProjectDir: null,
-      isolated: true,
-    };
+    if (options.workingDir === undefined) {
+      return {
+        workingDir: ISOLATED_WORKSPACE_DIR,
+        hooksProjectDir: null,
+        isolated: true,
+      };
+    }
   }
   // @spec WUP-001 — Resolve relative local defaults against the backend home.
   const base =
@@ -96,15 +99,23 @@ export async function resolveNewConversationWorkspace(options: {
       clientOptions.host,
     );
   const workingDir = await resolveAbsoluteAgentServerPath(base);
-  // A container does not see host paths, so host hooks do not apply.
-  const hooksProjectDir = options.inContainer
-    ? null
-    : await resolveHooksProjectDir(options.workingDir, clientOptions.host);
-  return {
-    workingDir,
-    hooksProjectDir,
-    isolated: false,
-  };
+  const inContainer = isolated || !!options.inContainer;
+  // The Docker runtime mounts a host `working_dir` at /workspace, except the
+  // literal /workspace, which becomes a new empty sandbox.
+  if (inContainer && workingDir === ISOLATED_WORKSPACE_DIR) {
+    throw new Error(i18n.t(I18nKey.HOME$DOCKER_WORKSPACE_PATH_RESERVED));
+  }
+  // A container sees only the folder the user attached, so only its hooks apply.
+  let hooksProjectDir: string | null;
+  if (!inContainer) {
+    hooksProjectDir = await resolveHooksProjectDir(
+      options.workingDir,
+      clientOptions.host,
+    );
+  } else {
+    hooksProjectDir = options.workingDir === undefined ? null : workingDir;
+  }
+  return { workingDir, hooksProjectDir, isolated };
 }
 
 /**
@@ -124,16 +135,21 @@ function resolveHooksProjectDir(
 /**
  * The hooks project dir of an existing conversation, resolved as
  * `resolveNewConversationWorkspace()` resolved it at start from the workspace
- * the user attached. `null` on an isolated (Docker) backend or for a
- * conversation in its own container, which never load host hooks.
+ * the user attached. A container conversation (every conversation on an
+ * isolated backend) sees only that folder, so without one it has no hooks.
  */
 export async function resolveConversationHooksProjectDir(
   selectedWorkspace: string | null | undefined,
   inContainer = false,
 ): Promise<string | null> {
-  if (inContainer) return null;
   const clientOptions = getAgentServerClientOptions();
-  const info = await getConversationServerInfo(clientOptions);
-  if (usesIsolatedWorkspace(info)) return null;
+  if (
+    inContainer ||
+    usesIsolatedWorkspace(await getConversationServerInfo(clientOptions))
+  ) {
+    return selectedWorkspace && selectedWorkspace !== ISOLATED_WORKSPACE_DIR
+      ? resolveAbsoluteAgentServerPath(selectedWorkspace)
+      : null;
+  }
   return resolveHooksProjectDir(selectedWorkspace, clientOptions.host);
 }

@@ -6,21 +6,30 @@ export const DEFAULT_WORKSPACE_MODE: WorkspaceMode = "local_repo";
 
 const HOST_WORKSPACE_MODES: WorkspaceMode[] = ["local_repo", "new_worktree"];
 
+export const ALL_WORKSPACE_MODES: readonly WorkspaceMode[] = [
+  ...HOST_WORKSPACE_MODES,
+  "docker_container",
+];
+
 /**
- * The modes the launcher offers; Docker only when the server can run it.
- * Without a workspace there is no repo to work in or branch, so the only
- * choice left is where the conversation runs.
+ * The modes the launcher offers: host modes when the conversation may run on
+ * the host, Docker when the server can run it. Without a workspace there is
+ * no repo to work in or branch, so the only choice left is where it runs.
  */
-export function getWorkspaceModeOptions(
-  dockerSelectable: boolean,
-  hasWorkspace: boolean,
-): WorkspaceMode[] {
+export function getWorkspaceModeOptions(available: {
+  local: boolean;
+  docker: boolean;
+  hasWorkspace: boolean;
+}): WorkspaceMode[] {
+  const { local, docker, hasWorkspace } = available;
   if (!hasWorkspace) {
-    return dockerSelectable ? ["local_repo", "docker_container"] : [];
+    if (!docker) return [];
+    return local ? ["local_repo", "docker_container"] : ["docker_container"];
   }
-  return dockerSelectable
-    ? [...HOST_WORKSPACE_MODES, "docker_container"]
-    : HOST_WORKSPACE_MODES;
+  return [
+    ...(local ? HOST_WORKSPACE_MODES : []),
+    ...(docker ? (["docker_container"] as const) : []),
+  ];
 }
 
 const MODE_BY_DEFAULT_RUNTIME: Record<string, WorkspaceMode> = {
@@ -31,17 +40,23 @@ const MODE_BY_DEFAULT_RUNTIME: Record<string, WorkspaceMode> = {
 
 /**
  * The mode the launcher starts on: the Settings → Runtime default
- * (`conversation_settings.default_runtime`), or the last one used on a server
- * whose settings have no such field.
+ * (`conversation_settings.default_runtime`), else the last one used in this
+ * browser, else the first mode offered; each only if offered and enabled.
  */
 export function getDefaultWorkspaceMode(
   defaultRuntime: unknown,
   lastUsed: WorkspaceMode,
+  options: readonly WorkspaceMode[],
+  disabled: readonly WorkspaceMode[] = [],
 ): WorkspaceMode {
-  return typeof defaultRuntime === "string" &&
-    defaultRuntime in MODE_BY_DEFAULT_RUNTIME
-    ? MODE_BY_DEFAULT_RUNTIME[defaultRuntime]
-    : lastUsed;
+  const usable = (mode: WorkspaceMode | undefined): mode is WorkspaceMode =>
+    !!mode && options.includes(mode) && !disabled.includes(mode);
+  const saved =
+    typeof defaultRuntime === "string" &&
+    Object.hasOwn(MODE_BY_DEFAULT_RUNTIME, defaultRuntime)
+      ? MODE_BY_DEFAULT_RUNTIME[defaultRuntime]
+      : undefined;
+  return [saved, lastUsed, ...options].find(usable) ?? DEFAULT_WORKSPACE_MODE;
 }
 
 export const LAST_LOCAL_WORKSPACE_MODE_STORAGE_KEY =
