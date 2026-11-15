@@ -20,6 +20,7 @@ import { I18nKey } from "#/i18n/declaration";
 import {
   ConversationRuntimePolicyError,
   isContainerWorkspaceMode,
+  MIN_AGENT_SERVER_VERSION_FOR_DOCKER_WORKTREE,
   planConversationRuntime,
   WORKSPACE_MODE_TAG_KEY,
   type ParentRuntime,
@@ -28,11 +29,15 @@ import {
   type ServerRuntimes,
 } from "#/utils/workspace-mode";
 import {
+  folderHasGitHistory,
   getServerRuntimes,
+  ISOLATED_WORKSPACE_DIR,
   requireConversationServerInfo,
   resolveConversationHooksProjectDir,
   resolveNewConversationWorkspace,
+  supportsDockerWorktree,
 } from "../conversation-workspace";
+import { displayErrorToast } from "#/utils/custom-toast-handlers";
 import HooksService from "../hooks-service";
 import {
   getActiveBackend,
@@ -116,17 +121,28 @@ const RUNTIME_REFUSAL_MESSAGE_KEYS: Record<RuntimePolicyRefusal, I18nKey> = {
   docker_unavailable: I18nKey.HOME$DOCKER_UNAVAILABLE,
   docker_parent: I18nKey.CONVERSATION$DOCKER_PARENT_UNSUPPORTED,
   local_disallowed: I18nKey.CONVERSATION$LOCAL_CONVERSATIONS_DISALLOWED,
+  docker_worktree_unsupported: I18nKey.HOME$DOCKER_WORKTREE_UNSUPPORTED,
+  docker_worktree_needs_folder: I18nKey.HOME$DOCKER_WORKTREE_NEEDS_GIT,
+  docker_worktree_needs_git: I18nKey.HOME$DOCKER_WORKTREE_NEEDS_GIT,
 };
+
+function runtimePolicyError(
+  refusal: RuntimePolicyRefusal,
+): ConversationRuntimePolicyError {
+  return new ConversationRuntimePolicyError(
+    refusal,
+    i18n.t(RUNTIME_REFUSAL_MESSAGE_KEYS[refusal], {
+      version: MIN_AGENT_SERVER_VERSION_FOR_DOCKER_WORKTREE,
+    }),
+  );
+}
 
 function requireRuntimePlan(
   input: Parameters<typeof planConversationRuntime>[0],
 ): RuntimePlan {
   const result = planConversationRuntime(input);
   if (result.ok) return result.plan;
-  throw new ConversationRuntimePolicyError(
-    result.refusal,
-    i18n.t(RUNTIME_REFUSAL_MESSAGE_KEYS[result.refusal]),
-  );
+  throw runtimePolicyError(result.refusal);
 }
 
 function parentRuntimeOf(
@@ -659,6 +675,7 @@ class AgentServerConversationService {
       hasWorkingDir: !!workingDirOverride,
       server,
       allowLocal: true,
+      dockerWorktreeSupported: supportsDockerWorktree(info),
       parent: await this.resolveParentRuntime(parentConversationId, server),
     });
     const { workingDir, hooksProjectDir } =
@@ -669,6 +686,12 @@ class AgentServerConversationService {
         selectedRepository: metadata?.selected_repository,
         inContainer: plan.inContainer,
       });
+    if (
+      plan.mode === "docker_worktree" &&
+      !(await folderHasGitHistory(workingDir))
+    ) {
+      throw runtimePolicyError("docker_worktree_needs_git");
+    }
 
     // Use encrypted settings to avoid exposing secrets in the browser
     const payload = await buildStartConversationRequestWithEncryptedSettings({
@@ -724,6 +747,18 @@ class AgentServerConversationService {
     const localBackend = getEffectiveLocalBackend();
     if (!localBackend) throw new NoBackendAvailableError();
 
+    // The agent-server runs a non-repo or unborn-HEAD folder in place
+    // instead of failing the Docker Worktree start.
+    let recordedMode = plan.mode;
+    const startedDir = data.workspace?.working_dir;
+    if (
+      plan.mode === "docker_worktree" &&
+      (startedDir === workingDir || startedDir === ISOLATED_WORKSPACE_DIR)
+    ) {
+      recordedMode = "docker_container";
+      displayErrorToast(i18n.t(I18nKey.HOME$DOCKER_WORKTREE_NOT_CREATED));
+    }
+
     // A Docker conversation is recorded even without a workspace: hooks and
     // restarts read its workspace_mode.
     if (
@@ -742,7 +777,7 @@ class AgentServerConversationService {
         selected_branch: metadata?.selected_branch ?? null,
         git_provider: metadata?.git_provider ?? null,
         selected_workspace: workingDirOverride ?? null,
-        workspace_mode: plan.mode,
+        workspace_mode: recordedMode,
       });
     }
 
@@ -782,6 +817,7 @@ class AgentServerConversationService {
       hasWorkingDir: true,
       server,
       allowLocal: true,
+      dockerWorktreeSupported: supportsDockerWorktree(info),
       parent: parentRuntimeOf(parentConversationId, parent, server),
     });
     const workingDir =

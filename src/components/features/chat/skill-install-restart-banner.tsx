@@ -35,17 +35,19 @@ export function SkillInstallRestartBanner({
 
   // A container installs into its mount of the host folder; without one the
   // skill sits in a private workspace a new conversation would not get.
-  const inContainer =
-    !!conversationId &&
-    isContainerWorkspaceMode(
-      getConversationWorkspaceMode(conversationId, conversation?.tags),
-    );
+  // A Docker Worktree installs into a worktree whose git dir only that
+  // container mounts, and its folder lacks the skill: no restart either.
+  const workspaceMode = conversationId
+    ? getConversationWorkspaceMode(conversationId, conversation?.tags)
+    : null;
+  const inContainer = isContainerWorkspaceMode(workspaceMode);
   const hostFolder = conversation?.selected_workspace ?? undefined;
 
   // Local-only: the cloud create path ignores workingDir entirely.
   if (
     backend.kind !== "local" ||
     installs.length === 0 ||
+    workspaceMode === "docker_worktree" ||
     (inContainer && !hostFolder)
   ) {
     return null;

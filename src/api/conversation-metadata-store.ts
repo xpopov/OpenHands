@@ -7,7 +7,11 @@ import {
 
 const STORAGE_KEY = "openhands-agent-server-conversation-metadata";
 
-export type WorkspaceMode = "local_repo" | "new_worktree" | "docker_container";
+export type WorkspaceMode =
+  | "local_repo"
+  | "new_worktree"
+  | "docker_container"
+  | "docker_worktree";
 
 export interface ConversationMetadata {
   selected_repository: string | null;
@@ -31,6 +35,9 @@ export interface ConversationMetadata {
    * generated per-conversation worktree. `docker_container` runs the
    * conversation in its own container with the selected folder mounted at
    * `/workspace` (agent-server `conversation_runtime: "docker"`).
+   * `docker_worktree` runs it in a container on a new worktree of the
+   * selected repo; it is recorded as `docker_container` when the
+   * agent-server fell back to the folder itself.
    */
   workspace_mode?: WorkspaceMode | null;
   /**

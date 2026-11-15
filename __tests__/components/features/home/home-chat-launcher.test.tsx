@@ -12,6 +12,7 @@ import type { WorkspaceMode } from "#/api/conversation-metadata-store";
 import AgentServerConversationService from "#/api/conversation-service/agent-server-conversation-service.api";
 import AutomationService from "#/api/automation-service/automation-service.api";
 import WorkspacesService from "#/api/workspaces-service/workspaces-service.api";
+import AgentServerGitService from "#/api/git-service/agent-server-git-service.api";
 import SettingsService from "#/api/settings-service/settings-service.api";
 import { MOCK_DEFAULT_USER_SETTINGS } from "#/mocks/handlers";
 import ProfilesService from "#/api/profiles-service/profiles-service.api";
@@ -210,11 +211,13 @@ vi.mock("#/components/features/home/home-git-control-bar-preview", () => ({
   HomeGitControlBarPreview: ({
     workspaceMode,
     workspaceModes,
+    disabledWorkspaceModeReasons,
     backendKind,
     onWorkspaceModeChange,
   }: {
     workspaceMode: WorkspaceMode;
     workspaceModes: WorkspaceMode[];
+    disabledWorkspaceModeReasons?: Partial<Record<WorkspaceMode, string>>;
     backendKind: "local" | "cloud";
     onWorkspaceModeChange: (mode: WorkspaceMode) => void;
   }) => (
@@ -223,6 +226,14 @@ vi.mock("#/components/features/home/home-git-control-bar-preview", () => ({
         {backendKind}:{workspaceMode}
       </span>
       <span data-testid="stub-workspace-modes">{workspaceModes.join(",")}</span>
+      <span data-testid="stub-disabled-workspace-modes">
+        {Object.keys(disabledWorkspaceModeReasons ?? {}).join(",")}
+      </span>
+      <button
+        type="button"
+        data-testid="stub-workspace-mode-docker-worktree"
+        onClick={() => onWorkspaceModeChange("docker_worktree")}
+      />
       <button
         type="button"
         data-testid="stub-workspace-mode-docker-container"
@@ -1304,4 +1315,179 @@ describe("HomeChatLauncher on a Docker-only server", () => {
       workspaceMode: "docker_container",
     });
   });
+});
+
+describe("HomeChatLauncher Docker Worktree", () => {
+  const oneCommit = {
+    commits: [
+      {
+        sha: "a".repeat(40),
+        shortSha: "aaaaaaa",
+        subject: "init",
+        author: "dev",
+        timestamp: "2026-01-01T00:00:00+00:00",
+      },
+    ],
+    hasMore: false,
+  };
+
+  const useHybridServer = (dockerWorktreeSupported: boolean) =>
+    mockUseConversationWorkspace.mockReturnValue({
+      isolated: false,
+      dockerSelectable: true,
+      dockerAvailable: true,
+      dockerWorktreeSupported,
+      unsupportedMessage: null,
+    });
+
+  const pickFolder = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByTestId("open-workspace-button"));
+    await user.click(
+      await screen.findByTestId("stub-workspace-dialog-confirm"),
+    );
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockImages = [];
+    mockFiles = [];
+    mockUseActiveBackend.mockReturnValue(localBackend);
+    mockUseLlmConfigured.mockReturnValue({
+      isConfigured: true,
+      isLoading: false,
+    });
+    sendMessageWithAttachments.mockResolvedValue({
+      text: "hello world",
+      content: "hello world",
+      imageUrls: [],
+      fileUrls: [],
+      timestamp: "2020-01-01T00:00:00.000Z",
+    });
+    window.localStorage.removeItem(LAST_LOCAL_WORKSPACE_MODE_STORAGE_KEY);
+    vi.spyOn(WorkspacesService, "listWorkspaces").mockResolvedValue({
+      workspaces: [],
+      workspaceParents: [],
+    });
+    vi.spyOn(AutomationService, "checkHealth").mockResolvedValue({
+      status: "ok",
+    });
+    vi.spyOn(AutomationService, "getAutomations").mockResolvedValue({
+      automations: [],
+      total: 0,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    toast.remove();
+    window.localStorage.removeItem(LAST_LOCAL_WORKSPACE_MODE_STORAGE_KEY);
+  });
+
+  it("offers Docker Worktree on a supporting server and starts it", async () => {
+    useHybridServer(true);
+    const commitsSpy = vi
+      .spyOn(AgentServerGitService, "getGitCommits")
+      .mockResolvedValue(oneCommit);
+    const createSpy = vi
+      .spyOn(AgentServerConversationService, "createConversation")
+      .mockResolvedValue(
+        makeConversationResponse({ app_conversation_id: "conv-dwt" }),
+      );
+    renderLauncher();
+    const user = userEvent.setup();
+
+    await pickFolder(user);
+    expect(screen.getByTestId("stub-workspace-modes")).toHaveTextContent(
+      "local_repo,new_worktree,docker_container,docker_worktree",
+    );
+    await waitFor(() =>
+      expect(commitsSpy).toHaveBeenCalledWith(null, null, "/p/app", 1),
+    );
+    await user.click(screen.getByTestId("stub-workspace-mode-docker-worktree"));
+    expect(screen.getByTestId("stub-workspace-mode")).toHaveTextContent(
+      "local:docker_worktree",
+    );
+    expect(
+      screen.getByTestId("stub-disabled-workspace-modes"),
+    ).toBeEmptyDOMElement();
+    await user.click(screen.getByTestId("stub-chat-submit"));
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
+    expect(createSpy.mock.calls[0]?.[0]).toMatchObject({
+      workingDirOverride: "/p/app",
+      workspaceMode: "docker_worktree",
+    });
+  });
+
+  it("hides Docker Worktree when the server is too old", async () => {
+    useHybridServer(false);
+    const commitsSpy = vi.spyOn(AgentServerGitService, "getGitCommits");
+    renderLauncher();
+    const user = userEvent.setup();
+
+    await pickFolder(user);
+    expect(screen.getByTestId("stub-workspace-modes")).toHaveTextContent(
+      /^local_repo,new_worktree,docker_container$/,
+    );
+    expect(commitsSpy).not.toHaveBeenCalled();
+  });
+
+  it("offers Docker Worktree next to Docker on a Docker-only server", async () => {
+    mockUseConversationWorkspace.mockReturnValue({
+      isolated: true,
+      dockerSelectable: false,
+      dockerAvailable: true,
+      dockerWorktreeSupported: true,
+      unsupportedMessage: null,
+    });
+    vi.spyOn(AgentServerGitService, "getGitCommits").mockResolvedValue(
+      oneCommit,
+    );
+    renderLauncher();
+    const user = userEvent.setup();
+
+    await pickFolder(user);
+    expect(screen.getByTestId("stub-workspace-modes")).toHaveTextContent(
+      /^docker_container,docker_worktree$/,
+    );
+  });
+
+  it.each([
+    ["has no commits", () => Promise.resolve({ commits: [], hasMore: false })],
+    ["cannot be probed", () => Promise.reject(new Error("probe failed"))],
+  ])(
+    "disables Docker Worktree when the folder %s and does not keep the pick",
+    async (_label, probe) => {
+      useHybridServer(true);
+      vi.spyOn(AgentServerGitService, "getGitCommits").mockImplementation(
+        probe,
+      );
+      const createSpy = vi
+        .spyOn(AgentServerConversationService, "createConversation")
+        .mockResolvedValue(
+          makeConversationResponse({ app_conversation_id: "conv-nogit" }),
+        );
+      renderLauncher();
+      const user = userEvent.setup();
+
+      await pickFolder(user);
+      await waitFor(() =>
+        expect(
+          screen.getByTestId("stub-disabled-workspace-modes"),
+        ).toHaveTextContent("docker_worktree"),
+      );
+      await user.click(
+        screen.getByTestId("stub-workspace-mode-docker-worktree"),
+      );
+      expect(screen.getByTestId("stub-workspace-mode")).toHaveTextContent(
+        "local:local_repo",
+      );
+      await user.click(screen.getByTestId("stub-chat-submit"));
+
+      await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
+      expect(createSpy.mock.calls[0]?.[0]).toMatchObject({
+        workspaceMode: "local_repo",
+      });
+    },
+  );
 });

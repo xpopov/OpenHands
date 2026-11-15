@@ -1,4 +1,5 @@
 import { useConversationWorkspace } from "#/hooks/query/use-conversation-workspace";
+import { useFolderHasGitHistory } from "#/hooks/query/use-folder-has-git-history";
 import { useEffect, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
@@ -119,14 +120,29 @@ export function HomeChatLauncher() {
   const {
     isolated,
     dockerAvailable,
+    dockerWorktreeSupported,
     serverInfoLoading,
     unsupportedMessage: runtimeWorkspaceMessage,
   } = useConversationWorkspace();
   const workspaceModes = getWorkspaceModeOptions({
     local: !isolated,
     docker: dockerAvailable,
+    dockerWorktree: dockerAvailable && dockerWorktreeSupported,
     hasWorkspace: !isLocal || !!pendingWorkspace,
   });
+  const dockerWorktreeOffered = workspaceModes.includes("docker_worktree");
+  const folderGitHistory = useFolderHasGitHistory(
+    pendingWorkspace?.path,
+    isLocal && dockerWorktreeOffered,
+  );
+  const disabledWorkspaceModeReasons: Partial<Record<WorkspaceMode, string>> =
+    dockerWorktreeOffered &&
+    (folderGitHistory.data === false || folderGitHistory.isError)
+      ? { docker_worktree: t(I18nKey.HOME$DOCKER_WORKTREE_NEEDS_GIT) }
+      : {};
+  const disabledWorkspaceModes = Object.keys(
+    disabledWorkspaceModeReasons,
+  ) as WorkspaceMode[];
   // Picked here > Settings → Runtime default > last used in this browser >
   // first offered. While server_info is pending the offered modes are
   // unknown, so a remembered Docker choice is kept rather than turned into
@@ -135,12 +151,15 @@ export function HomeChatLauncher() {
     ? ALL_WORKSPACE_MODES
     : workspaceModes;
   const effectiveWorkspaceMode =
-    pickedWorkspaceMode && candidateModes.includes(pickedWorkspaceMode)
+    pickedWorkspaceMode &&
+    candidateModes.includes(pickedWorkspaceMode) &&
+    !disabledWorkspaceModes.includes(pickedWorkspaceMode)
       ? pickedWorkspaceMode
       : getDefaultWorkspaceMode(
           isLocal ? settings?.conversation_settings?.default_runtime : null,
           lastUsedWorkspaceMode,
           candidateModes,
+          disabledWorkspaceModes,
         );
   const workspacesUnsupportedMessage =
     runtimeWorkspaceMessage ??
@@ -391,6 +410,7 @@ export function HomeChatLauncher() {
               provider={pendingProvider}
               workspaceMode={effectiveWorkspaceMode}
               workspaceModes={workspaceModes}
+              disabledWorkspaceModeReasons={disabledWorkspaceModeReasons}
               backendKind={backend.kind}
               onRepoClick={() => setIsDialogOpen(true)}
               onWorkspaceModeChange={setWorkspaceMode}

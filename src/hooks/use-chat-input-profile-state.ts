@@ -84,6 +84,7 @@ export function useChatInputProfileState(): ChatInputProfileState {
         };
       }
       if (conversation?.selected_workspace) {
+        // A Docker Worktree relaunches as one: a fresh worktree of the folder.
         variables.workingDir = conversation.selected_workspace;
         variables.workspaceMode = workspaceMode ?? "local_repo";
       } else if (isContainerWorkspaceMode(workspaceMode)) {

@@ -3,7 +3,10 @@ import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react";
 import type { BackendKind } from "#/api/backend-registry/types";
 import type { WorkspaceMode } from "#/api/conversation-metadata-store";
-import { getWorkspaceModeI18nKey } from "#/utils/workspace-mode";
+import {
+  getWorkspaceModeHintI18nKey,
+  getWorkspaceModeI18nKey,
+} from "#/utils/workspace-mode";
 import { cn } from "#/utils/utils";
 import {
   dropdownMenuListClassName,
@@ -18,6 +21,8 @@ interface WorkspaceModeSelectorProps {
   backendKind: BackendKind;
   onChange: (value: WorkspaceMode) => void;
   disabled?: boolean;
+  /** Modes shown but not selectable, with the reason shown in the row. */
+  disabledReasons?: Partial<Record<WorkspaceMode, string>>;
   testId?: string;
 }
 
@@ -27,6 +32,7 @@ export function WorkspaceModeSelector({
   backendKind,
   onChange,
   disabled = false,
+  disabledReasons = {},
   testId = "workspace-mode-selector",
 }: WorkspaceModeSelectorProps) {
   const { t } = useTranslation("openhands");
@@ -99,14 +105,21 @@ export function WorkspaceModeSelector({
         >
           {options.map((option) => {
             const optionLabel = t(getWorkspaceModeI18nKey(option, backendKind));
+            const reason = disabledReasons[option];
+            const hintKey = getWorkspaceModeHintI18nKey(option);
+            const secondLine = reason ?? (hintKey ? t(hintKey) : null);
             return (
               <button
                 key={option}
                 type="button"
                 role="menuitemradio"
                 aria-checked={option === value}
+                aria-disabled={reason ? true : undefined}
+                disabled={!!reason}
+                title={reason}
                 data-testid={`${testId}-option-${option}`}
                 onClick={() => {
+                  if (reason) return;
                   onChange(option);
                   setOpen(false);
                 }}
@@ -115,7 +128,14 @@ export function WorkspaceModeSelector({
                 <span className={dropdownMenuRowIconWrapperClassName}>
                   <WorkspaceModeIcon mode={option} />
                 </span>
-                <span className="truncate">{optionLabel}</span>
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate">{optionLabel}</span>
+                  {secondLine ? (
+                    <span className="text-xs text-[var(--oh-text-secondary)]">
+                      {secondLine}
+                    </span>
+                  ) : null}
+                </span>
               </button>
             );
           })}

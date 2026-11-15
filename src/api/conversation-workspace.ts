@@ -5,19 +5,25 @@ import {
   getAgentServerClientOptions,
   type AgentServerClientOverrides,
 } from "./agent-server-client-options";
-import type { ServerRuntimes } from "#/utils/workspace-mode";
+import {
+  MIN_AGENT_SERVER_VERSION_FOR_DOCKER_WORKTREE,
+  type ServerRuntimes,
+} from "#/utils/workspace-mode";
 import {
   AgentServerUnavailableError,
+  compareAgentServerVersions,
   getCachedAgentServerInfo,
+  getDisplayAgentServerVersion,
   type AgentServerInfo,
 } from "./agent-server-compatibility";
+import AgentServerGitService from "./git-service/agent-server-git-service.api";
 import {
   buildConversationWorkingDirForBackend,
   getWorkspaceRootForBackend,
 } from "./agent-server-config";
 import { resolveAbsoluteAgentServerPath } from "./agent-server-home";
 
-const ISOLATED_WORKSPACE_DIR = "/workspace";
+export const ISOLATED_WORKSPACE_DIR = "/workspace";
 
 /** A Docker-only server: a server that also offers `local` is not isolated. */
 export function usesIsolatedWorkspace(
@@ -34,6 +40,31 @@ export function supportsDockerConversations(
   info: AgentServerInfo | null | undefined,
 ): boolean {
   return !!info?.available_conversation_runtimes?.includes("docker");
+}
+
+/**
+ * Docker Worktree is safe only when the agent-server keeps host worktrees
+ * intact. An unparseable version counts as unsupported.
+ */
+export function supportsDockerWorktree(
+  info: AgentServerInfo | null | undefined,
+): boolean {
+  const version = info ? getDisplayAgentServerVersion(info) : null;
+  if (!version) return false;
+  const comparison = compareAgentServerVersions(
+    version,
+    MIN_AGENT_SERVER_VERSION_FOR_DOCKER_WORKTREE,
+  );
+  return comparison !== null && comparison >= 0;
+}
+
+/**
+ * Whether a host folder can branch a worktree: a git repo with at least one
+ * commit. A server without the commits route (`null`) counts as no.
+ */
+export async function folderHasGitHistory(path: string): Promise<boolean> {
+  const page = await AgentServerGitService.getGitCommits(null, null, path, 1);
+  return !!page && page.commits.length > 0;
 }
 
 export async function getConversationServerInfo(

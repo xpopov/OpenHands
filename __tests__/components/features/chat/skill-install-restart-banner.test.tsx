@@ -33,6 +33,17 @@ vi.mock(
   }),
 );
 
+// The conversation (tags, selected_workspace) normally comes from the
+// route-scoped user-conversation query; none by default.
+const activeConversation = vi.hoisted(() => ({
+  current: undefined as
+    | { tags?: Record<string, string>; selected_workspace?: string }
+    | undefined,
+}));
+vi.mock("#/hooks/query/use-active-conversation", () => ({
+  useActiveConversation: () => ({ data: activeConversation.current }),
+}));
+
 vi.mock("#/api/agent-profiles-service/agent-profiles-service.api", () => ({
   __esModule: true,
   default: {
@@ -113,6 +124,7 @@ describe("SkillInstallRestartBanner", () => {
 
   afterEach(() => {
     __resetActiveStoreForTests();
+    activeConversation.current = undefined;
   });
 
   it("renders nothing when the conversation has no skill installs", () => {
@@ -224,5 +236,54 @@ describe("SkillInstallRestartBanner", () => {
       expect(call?.[0]?.workspaceMode).toBe("local_repo");
       expect(navigate).toHaveBeenCalledWith("/conversations/new-conv-1");
     });
+  });
+
+  it("restarts a tagged Docker conversation in Docker on its host folder", async () => {
+    // No localStorage metadata: the server-side tag alone marks the container.
+    removeStoredConversationMetadata(CONVERSATION_ID);
+    activeConversation.current = {
+      tags: { workspacemode: "docker_container" },
+      selected_workspace: "/Users/jane/projects/foo",
+    };
+    const createConversationSpy = vi
+      .spyOn(AgentServerConversationService, "createConversation")
+      .mockResolvedValue({
+        id: "task-1",
+        app_conversation_id: "new-conv-1",
+        agent_server_url: null,
+      } as never);
+    renderBanner();
+    // The container reports its mount path, not the host folder.
+    act(() => {
+      useEventStore
+        .getState()
+        .addEvent(makeInstallEvent("evt-1", "codereview", "/workspace"));
+    });
+    await screen.findByTestId("skill-install-restart-banner");
+
+    await userEvent.click(screen.getByTestId("skill-install-restart-action"));
+
+    await waitFor(() => {
+      const call = createConversationSpy.mock.lastCall;
+      expect(call?.[0]?.workingDirOverride).toBe("/Users/jane/projects/foo");
+      expect(call?.[0]?.workspaceMode).toBe("docker_container");
+    });
+  });
+
+  it("renders nothing for a Docker Worktree conversation", async () => {
+    // Restarting on the folder would lose the skill, which sits in the worktree.
+    activeConversation.current = {
+      tags: { workspacemode: "docker_worktree" },
+      selected_workspace: "/Users/jane/projects/foo",
+    };
+    renderBanner();
+    addInstallEvent("evt-1");
+
+    await waitFor(() =>
+      expect(useEventStore.getState().events.length).toBeGreaterThan(0),
+    );
+    expect(
+      screen.queryByTestId("skill-install-restart-banner"),
+    ).not.toBeInTheDocument();
   });
 });

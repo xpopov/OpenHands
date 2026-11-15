@@ -26,6 +26,8 @@ import {
 import { ConversationRuntimePolicyError } from "#/utils/workspace-mode";
 import AgentServerConversationService from "#/api/conversation-service/agent-server-conversation-service.api";
 import HooksService from "#/api/hooks-service";
+import i18n from "#/i18n";
+import { displayErrorToast } from "#/utils/custom-toast-handlers";
 import LLMSubscriptionService from "#/api/llm-subscription-service";
 import {
   LLM_AUTH_TYPE_SUBSCRIPTION,
@@ -127,6 +129,12 @@ vi.mock("#/api/agent-server-config", () => ({
   getLockedCloudAuthMode: vi.fn(() => "api-key"),
 }));
 
+// The fallback toast is a UI side effect this service test never renders.
+vi.mock("#/utils/custom-toast-handlers", () => ({
+  displayErrorToast: vi.fn(),
+  displaySuccessToast: vi.fn(),
+}));
+
 vi.mock("#/api/settings-service/settings-service.api", () => ({
   default: {
     getSettings: mockGetSettings,
@@ -172,6 +180,11 @@ const DOCKER_ONLY_SERVER_INFO = {
   version: "1.54.0",
   conversation_runtime: "docker",
   available_conversation_runtimes: [],
+};
+
+const DOCKER_WORKTREE_SERVER_INFO = {
+  ...HYBRID_SERVER_INFO,
+  version: "1.61.0",
 };
 
 function useServerInfo(info: Record<string, unknown>) {
@@ -1273,6 +1286,182 @@ describe("AgentServerConversationService", () => {
           ),
           "docker_parent",
         );
+      });
+
+      describe("Docker Worktree", () => {
+        const FOLDER = "/Users/jane/projects/foo";
+        const commitsRequested: string[] = [];
+        const answerCommits = (commits: number, status = 200) =>
+          server.use(
+            http.get("*/api/git/commits", ({ request }) => {
+              commitsRequested.push(new URL(request.url).search);
+              if (status !== 200) return new HttpResponse(null, { status });
+              return HttpResponse.json({
+                commits: Array.from({ length: commits }, (_, i) => ({
+                  sha: String(i).repeat(40),
+                  short_sha: String(i).repeat(7),
+                  subject: "init",
+                  author: "Jane",
+                  timestamp: "2026-11-01T00:00:00Z",
+                })),
+                has_more: false,
+              });
+            }),
+          );
+        const startDockerWorktree = (workingDirOverride?: string) =>
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride,
+            workspaceMode: "docker_worktree",
+          });
+
+        beforeEach(() => {
+          commitsRequested.length = 0;
+        });
+
+        it.each([
+          ["hybrid", DOCKER_WORKTREE_SERVER_INFO],
+          ["Docker-only", { ...DOCKER_ONLY_SERVER_INFO, version: "1.61.0" }],
+        ] as const)(
+          "asks a %s server for a worktree in a container on the folder",
+          async (_label, info) => {
+            useServerInfo(info);
+            answerCommits(1);
+            const hookConfig = {
+              pre_tool_use: [{ matcher: "terminal", hooks: [] }],
+              post_tool_use: [],
+              user_prompt_submit: [],
+              session_start: [],
+              session_end: [],
+              stop: [],
+            };
+            const loadWorkspaceHooks = vi
+              .spyOn(HooksService, "loadWorkspaceHooks")
+              .mockResolvedValue(hookConfig);
+
+            const created = await startDockerWorktree(FOLDER);
+
+            expect(commitsRequested).toEqual([
+              "?path=%2FUsers%2Fjane%2Fprojects%2Ffoo&limit=1",
+            ]);
+            expect(loadWorkspaceHooks).toHaveBeenCalledWith(FOLDER);
+            expect(postedBody()).toMatchObject({
+              worktree: true,
+              conversation_runtime: "docker",
+              workspace: { working_dir: FOLDER },
+              hook_config: hookConfig,
+              tags: { workspacemode: "docker_worktree" },
+            });
+            expect(
+              getStoredConversationMetadata(created.id)?.workspace_mode,
+            ).toBe("docker_worktree");
+            expect(displayErrorToast).not.toHaveBeenCalled();
+          },
+        );
+
+        it.each(["1.60.2", "1.61.0-rc1", "unknown"])(
+          "refuses agent-server %s with the version it needs",
+          async (version) => {
+            useServerInfo({ ...HYBRID_SERVER_INFO, version });
+            answerCommits(1);
+            i18n.addResourceBundle(i18n.language, "openhands", {
+              HOME$DOCKER_WORKTREE_UNSUPPORTED: "needs {{version}}",
+            });
+            const start = startDockerWorktree(FOLDER);
+            await expectRefusal(start, "docker_worktree_unsupported");
+            await expect(start).rejects.toThrow("needs 1.61.0");
+            expect(commitsRequested).toEqual([]);
+          },
+        );
+
+        it("refuses without a folder", async () => {
+          useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+          await expectRefusal(
+            startDockerWorktree(),
+            "docker_worktree_needs_folder",
+          );
+        });
+
+        it.each([
+          ["a non-repo or unborn HEAD", 0, 200],
+          ["a server without the commits route", 0, 404],
+        ])("refuses %s", async (_label, commits, status) => {
+          useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+          answerCommits(commits, status);
+          await expectRefusal(
+            startDockerWorktree(FOLDER),
+            "docker_worktree_needs_git",
+          );
+        });
+
+        it.each([FOLDER, "/workspace"])(
+          "records a container and warns when the server ran in %s",
+          async (startedDir) => {
+            useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+            answerCommits(1);
+            mockHttpPost.mockResolvedValue({
+              data: {
+                id: "ignored-server-id",
+                created_at: "2024-01-01",
+                updated_at: "2024-01-01",
+                workspace: { working_dir: startedDir },
+              },
+            });
+
+            const created = await startDockerWorktree(FOLDER);
+
+            expect(postedBody().tags).toMatchObject({
+              workspacemode: "docker_worktree",
+            });
+            expect(
+              getStoredConversationMetadata(created.id)?.workspace_mode,
+            ).toBe("docker_container");
+            expect(displayErrorToast).toHaveBeenCalledWith(
+              "HOME$DOCKER_WORKTREE_NOT_CREATED",
+            );
+          },
+        );
+
+        it("keeps Docker Worktree when the server ran in a worktree", async () => {
+          useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+          answerCommits(1);
+          mockHttpPost.mockResolvedValue({
+            data: {
+              id: "ignored-server-id",
+              created_at: "2024-01-01",
+              updated_at: "2024-01-01",
+              workspace: {
+                working_dir: "/tmp/conversation-worktrees/abc/foo",
+              },
+            },
+          });
+
+          const created = await startDockerWorktree(FOLDER);
+
+          expect(
+            getStoredConversationMetadata(created.id)?.workspace_mode,
+          ).toBe("docker_worktree");
+          expect(displayErrorToast).not.toHaveBeenCalled();
+        });
+
+        it("refuses a child or planner of a Docker Worktree parent", async () => {
+          useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+          parentConversation({ workspacemode: "docker_worktree" });
+          await expectRefusal(
+            AgentServerConversationService.createConversation({
+              agentProfileId: "profile-1",
+              workingDirOverride: FOLDER,
+              parentConversationId: "parent",
+            }),
+            "docker_parent",
+          );
+          await expectRefusal(
+            AgentServerConversationService.createLocalPlanningConversation(
+              "parent",
+            ),
+            "docker_parent",
+          );
+        });
       });
     });
   });

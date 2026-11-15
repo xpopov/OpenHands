@@ -3,6 +3,7 @@ import { useActiveBackend } from "#/contexts/active-backend-context";
 import {
   getConversationServerInfo,
   supportsDockerConversations,
+  supportsDockerWorktree,
   usesIsolatedWorkspace,
 } from "#/api/conversation-workspace";
 
@@ -29,6 +30,8 @@ export function useConversationWorkspace() {
     isolated,
     dockerSelectable,
     dockerAvailable: isolated || dockerSelectable,
+    dockerWorktreeSupported:
+      backend.kind === "local" && supportsDockerWorktree(query.data),
     serverInfoLoading: query.isLoading,
     // Docker conversations mount an attached host folder, so pickers stay on.
     unsupportedMessage: null,

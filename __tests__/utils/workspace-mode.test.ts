@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceMode } from "#/api/conversation-metadata-store";
 import {
   getDefaultWorkspaceMode,
+  getWorkspaceModeHintI18nKey,
   getWorkspaceModeOptions,
   isContainerWorkspaceMode,
   isWorkspaceMode,
@@ -12,7 +13,14 @@ import {
 } from "#/utils/workspace-mode";
 
 const HOST_MODES: WorkspaceMode[] = ["local_repo", "new_worktree"];
-const ALL_MODES: WorkspaceMode[] = [...HOST_MODES, "docker_container"];
+const ALL_MODES: WorkspaceMode[] = [
+  ...HOST_MODES,
+  "docker_container",
+  "docker_worktree",
+];
+const NON_WORKTREE_CONTAINER_MODES = ALL_MODES.filter(
+  (mode) => mode !== "docker_worktree",
+);
 
 const plan = (
   overrides: Partial<Parameters<typeof planConversationRuntime>[0]>,
@@ -21,6 +29,7 @@ const plan = (
     hasWorkingDir: true,
     server: "hybrid",
     allowLocal: true,
+    dockerWorktreeSupported: true,
     parent: "none",
     ...overrides,
   });
@@ -31,6 +40,16 @@ const DOCKER = {
     mode: "docker_container",
     conversationRuntime: "docker",
     worktree: false,
+    inContainer: true,
+  },
+};
+
+const DOCKER_WORKTREE = {
+  ok: true,
+  plan: {
+    mode: "docker_worktree",
+    conversationRuntime: "docker",
+    worktree: true,
     inContainer: true,
   },
 };
@@ -93,11 +112,15 @@ describe("planConversationRuntime", () => {
     },
   );
 
-  it("P5: refuses a container child of a host parent", () => {
-    expect(plan({ parent: "host", requestedMode: "docker_container" })).toEqual(
-      { ok: false, refusal: "docker_parent" },
-    );
-  });
+  it.each(["docker_container", "docker_worktree"] as const)(
+    "P5: refuses a %s child of a host parent",
+    (requestedMode) => {
+      expect(plan({ parent: "host", requestedMode })).toEqual({
+        ok: false,
+        refusal: "docker_parent",
+      });
+    },
+  );
 
   it.each(HOST_MODES)(
     "P6: refuses a %s child when local conversations are off",
@@ -117,7 +140,42 @@ describe("planConversationRuntime", () => {
     },
   );
 
-  it.each([undefined, ...ALL_MODES])(
+  it.each(["docker_only", "hybrid"] as const)(
+    "P8: starts a Docker Worktree on a folder on a %s server",
+    (server) => {
+      expect(plan({ server, requestedMode: "docker_worktree" })).toEqual(
+        DOCKER_WORKTREE,
+      );
+    },
+  );
+
+  it.each(["docker_only", "hybrid"] as const)(
+    "P8: refuses a Docker Worktree without a folder on a %s server",
+    (server) => {
+      expect(
+        plan({
+          server,
+          requestedMode: "docker_worktree",
+          hasWorkingDir: false,
+        }),
+      ).toEqual({ ok: false, refusal: "docker_worktree_needs_folder" });
+    },
+  );
+
+  it.each(["docker_only", "hybrid"] as const)(
+    "P8: refuses a Docker Worktree on an older %s server",
+    (server) => {
+      expect(
+        plan({
+          server,
+          requestedMode: "docker_worktree",
+          dockerWorktreeSupported: false,
+        }),
+      ).toEqual({ ok: false, refusal: "docker_worktree_unsupported" });
+    },
+  );
+
+  it.each([undefined, ...NON_WORKTREE_CONTAINER_MODES])(
     "P9: maps requested mode %s to Docker without a worktree on a Docker-only server",
     (requestedMode) => {
       expect(
@@ -154,33 +212,40 @@ describe("planConversationRuntime", () => {
     },
   );
 
-  it("never asks a container for a worktree", () => {
+  it("asks a container for a worktree only for a supported Docker Worktree on a folder", () => {
     const servers: ServerRuntimes[] = ["host_only", "docker_only", "hybrid"];
     const parents: ParentRuntime[] = ["none", "host", "container"];
     for (const requestedMode of [undefined, ...ALL_MODES])
       for (const hasWorkingDir of [true, false])
         for (const server of servers)
           for (const allowLocal of [true, false])
-            for (const parent of parents) {
-              const result = planConversationRuntime({
-                requestedMode,
-                hasWorkingDir,
-                server,
-                allowLocal,
-                parent,
-              });
-              if (!result.ok) continue;
-              expect(
-                result.plan.worktree &&
+            for (const dockerWorktreeSupported of [true, false])
+              for (const parent of parents) {
+                const result = planConversationRuntime({
+                  requestedMode,
+                  hasWorkingDir,
+                  server,
+                  allowLocal,
+                  dockerWorktreeSupported,
+                  parent,
+                });
+                if (!result.ok) continue;
+                expect(
+                  result.plan.worktree &&
+                    result.plan.conversationRuntime === "docker",
+                ).toBe(
+                  requestedMode === "docker_worktree" &&
+                    hasWorkingDir &&
+                    dockerWorktreeSupported &&
+                    parent === "none",
+                );
+                expect(result.plan.inContainer).toBe(
                   result.plan.conversationRuntime === "docker",
-              ).toBe(false);
-              expect(result.plan.inContainer).toBe(
-                result.plan.conversationRuntime === "docker",
-              );
-              expect(server !== "host_only" && parent === "container").toBe(
-                false,
-              );
-            }
+                );
+                expect(server !== "host_only" && parent === "container").toBe(
+                  false,
+                );
+              }
   });
 });
 
@@ -197,9 +262,37 @@ describe("getWorkspaceModeOptions", () => {
   ] as const)(
     "local=%s docker=%s folder=%s offers %j",
     (local, docker, hasWorkspace, expected) => {
-      expect(getWorkspaceModeOptions({ local, docker, hasWorkspace })).toEqual(
-        expected,
-      );
+      expect(
+        getWorkspaceModeOptions({
+          local,
+          docker,
+          dockerWorktree: false,
+          hasWorkspace,
+        }),
+      ).toEqual(expected);
+    },
+  );
+
+  it.each([
+    [
+      true,
+      true,
+      ["local_repo", "new_worktree", "docker_container", "docker_worktree"],
+    ],
+    [false, true, ["docker_container", "docker_worktree"]],
+    [true, false, ["local_repo", "docker_container"]],
+    [false, false, ["docker_container"]],
+  ] as const)(
+    "with Docker Worktree, local=%s folder=%s offers %j",
+    (local, hasWorkspace, expected) => {
+      expect(
+        getWorkspaceModeOptions({
+          local,
+          docker: true,
+          dockerWorktree: true,
+          hasWorkspace,
+        }),
+      ).toEqual(expected);
     },
   );
 });
@@ -235,6 +328,7 @@ describe("workspace mode predicates", () => {
     ["local_repo", false, false],
     ["new_worktree", false, true],
     ["docker_container", true, false],
+    ["docker_worktree", true, true],
     [null, false, false],
     [undefined, false, false],
   ] as const)("%s: container=%s worktree=%s", (mode, container, worktree) => {
@@ -246,11 +340,23 @@ describe("workspace mode predicates", () => {
     ["local_repo", true],
     ["new_worktree", true],
     ["docker_container", true],
+    ["docker_worktree", true],
     ["docker", false],
     ["", false],
     [null, false],
     [undefined, false],
   ] as const)("isWorkspaceMode(%s) is %s", (value, expected) => {
     expect(isWorkspaceMode(value)).toBe(expected);
+  });
+});
+
+describe("getWorkspaceModeHintI18nKey", () => {
+  it.each([
+    ["local_repo", null],
+    ["new_worktree", null],
+    ["docker_container", "COMMON$WORKSPACE_MODE_DOCKER_HINT"],
+    ["docker_worktree", "COMMON$WORKSPACE_MODE_DOCKER_WORKTREE_HINT"],
+  ] as const)("%s -> %s", (mode, key) => {
+    expect(getWorkspaceModeHintI18nKey(mode)).toBe(key);
   });
 });
