@@ -4,11 +4,210 @@ import { I18nKey } from "#/i18n/declaration";
 
 export const DEFAULT_WORKSPACE_MODE: WorkspaceMode = "local_repo";
 
+const HOST_WORKSPACE_MODES: WorkspaceMode[] = ["local_repo", "new_worktree"];
+
+export const ALL_WORKSPACE_MODES: readonly WorkspaceMode[] = [
+  ...HOST_WORKSPACE_MODES,
+  "docker_container",
+  "docker_worktree",
+];
+
+/** First agent-server whose Docker runtime keeps host worktrees intact (SDK #5318). */
+export const MIN_AGENT_SERVER_VERSION_FOR_DOCKER_WORKTREE = "1.61.0";
+
+/**
+ * The modes the launcher offers: host modes when the conversation may run on
+ * the host, Docker when the server can run it. Without a workspace there is
+ * no repo to work in or branch, so the only choice left is where it runs.
+ */
+export function getWorkspaceModeOptions(available: {
+  local: boolean;
+  docker: boolean;
+  dockerWorktree: boolean;
+  hasWorkspace: boolean;
+}): WorkspaceMode[] {
+  const { local, docker, dockerWorktree, hasWorkspace } = available;
+  if (!hasWorkspace) {
+    if (!docker) return [];
+    return local ? ["local_repo", "docker_container"] : ["docker_container"];
+  }
+  return [
+    ...(local ? HOST_WORKSPACE_MODES : []),
+    ...(docker ? (["docker_container"] as const) : []),
+    ...(dockerWorktree ? (["docker_worktree"] as const) : []),
+  ];
+}
+
+const MODE_BY_DEFAULT_RUNTIME: Record<string, WorkspaceMode> = {
+  local: "local_repo",
+  worktree: "new_worktree",
+  docker: "docker_container",
+};
+
+/**
+ * The mode the launcher starts on: the Settings → Runtime default
+ * (`conversation_settings.default_runtime`), else the last one used in this
+ * browser, else the first mode offered; each only if offered and enabled.
+ */
+export function getDefaultWorkspaceMode(
+  defaultRuntime: unknown,
+  lastUsed: WorkspaceMode,
+  options: readonly WorkspaceMode[],
+  disabled: readonly WorkspaceMode[] = [],
+): WorkspaceMode {
+  const usable = (mode: WorkspaceMode | undefined): mode is WorkspaceMode =>
+    !!mode && options.includes(mode) && !disabled.includes(mode);
+  const saved =
+    typeof defaultRuntime === "string" &&
+    Object.hasOwn(MODE_BY_DEFAULT_RUNTIME, defaultRuntime)
+      ? MODE_BY_DEFAULT_RUNTIME[defaultRuntime]
+      : undefined;
+  return [saved, lastUsed, ...options].find(usable) ?? DEFAULT_WORKSPACE_MODE;
+}
+
 export const LAST_LOCAL_WORKSPACE_MODE_STORAGE_KEY =
   "openhands-last-local-workspace-mode";
 
-function isWorkspaceMode(value: string | null): value is WorkspaceMode {
-  return value === "local_repo" || value === "new_worktree";
+export function isWorkspaceMode(
+  value: string | null | undefined,
+): value is WorkspaceMode {
+  return (
+    value === "local_repo" ||
+    value === "new_worktree" ||
+    value === "docker_container" ||
+    value === "docker_worktree"
+  );
+}
+
+export function isContainerWorkspaceMode(
+  mode: WorkspaceMode | null | undefined,
+): boolean {
+  return mode === "docker_container" || mode === "docker_worktree";
+}
+
+export function isWorktreeWorkspaceMode(
+  mode: WorkspaceMode | null | undefined,
+): boolean {
+  return mode === "new_worktree" || mode === "docker_worktree";
+}
+
+/** Conversation tag recording a container conversation's mode for other browsers. */
+export const WORKSPACE_MODE_TAG_KEY = "workspacemode";
+
+export type ServerRuntimes = "host_only" | "docker_only" | "hybrid";
+export type ParentRuntime = "none" | "host" | "container";
+export type RuntimePolicyRefusal =
+  | "docker_unavailable"
+  | "docker_parent"
+  | "local_disallowed"
+  | "docker_worktree_unsupported"
+  | "docker_worktree_needs_folder"
+  | "docker_worktree_needs_git";
+
+export interface RuntimePlan {
+  mode: WorkspaceMode;
+  conversationRuntime?: "local" | "docker";
+  worktree: boolean;
+  inContainer: boolean;
+}
+
+export type RuntimePlanResult =
+  | { ok: true; plan: RuntimePlan }
+  | { ok: false; refusal: RuntimePolicyRefusal };
+
+export class ConversationRuntimePolicyError extends Error {
+  readonly code: RuntimePolicyRefusal;
+
+  constructor(code: RuntimePolicyRefusal, message: string) {
+    super(message);
+    this.name = "ConversationRuntimePolicyError";
+    this.code = code;
+  }
+}
+
+export const isConversationRuntimePolicyError = (
+  error: unknown,
+): error is ConversationRuntimePolicyError =>
+  error instanceof ConversationRuntimePolicyError;
+
+const hostPlan = (
+  mode: WorkspaceMode,
+  conversationRuntime: "local" | undefined,
+): RuntimePlanResult => ({
+  ok: true,
+  plan: {
+    mode,
+    conversationRuntime,
+    worktree: mode === "new_worktree",
+    inContainer: false,
+  },
+});
+
+const DOCKER_WORKTREE_PLAN: RuntimePlanResult = {
+  ok: true,
+  plan: {
+    mode: "docker_worktree",
+    conversationRuntime: "docker",
+    worktree: true,
+    inContainer: true,
+  },
+};
+
+const DOCKER_PLAN: RuntimePlanResult = {
+  ok: true,
+  plan: {
+    mode: "docker_container",
+    conversationRuntime: "docker",
+    worktree: false,
+    inContainer: true,
+  },
+};
+
+/**
+ * Where a new conversation runs, decided once for every Canvas start path.
+ * A container receives `worktree: true` only for an explicit Docker
+ * Worktree on a folder and an agent-server that supports it, a child or
+ * planner never leaves a container for the host, and a server without a
+ * local runtime gets Docker even for a host mode recorded elsewhere.
+ */
+export function planConversationRuntime(input: {
+  requestedMode?: WorkspaceMode;
+  hasWorkingDir: boolean;
+  server: ServerRuntimes;
+  allowLocal: boolean;
+  dockerWorktreeSupported: boolean;
+  parent: ParentRuntime;
+}): RuntimePlanResult {
+  const requested =
+    input.requestedMode ??
+    (input.hasWorkingDir ? "local_repo" : "new_worktree");
+  const wantsContainer = isContainerWorkspaceMode(requested);
+
+  if (input.server === "host_only") {
+    return wantsContainer
+      ? { ok: false, refusal: "docker_unavailable" }
+      : hostPlan(requested, undefined);
+  }
+  const dockerOnly = input.server === "docker_only";
+  if (
+    input.parent === "container" ||
+    (input.parent === "host" && (dockerOnly || wantsContainer))
+  ) {
+    return { ok: false, refusal: "docker_parent" };
+  }
+  if (requested === "docker_worktree") {
+    if (!input.hasWorkingDir) {
+      return { ok: false, refusal: "docker_worktree_needs_folder" };
+    }
+    return input.dockerWorktreeSupported
+      ? DOCKER_WORKTREE_PLAN
+      : { ok: false, refusal: "docker_worktree_unsupported" };
+  }
+  if (dockerOnly || wantsContainer) return DOCKER_PLAN;
+  if (input.allowLocal) return hostPlan(requested, "local");
+  return input.parent === "none"
+    ? DOCKER_PLAN
+    : { ok: false, refusal: "local_disallowed" };
 }
 
 export function readStoredLocalWorkspaceMode(): WorkspaceMode {
@@ -41,7 +240,26 @@ export function getWorkspaceModeI18nKey(
   if (mode === "new_worktree") {
     return I18nKey.COMMON$WORKSPACE_MODE_NEW_WORKTREE;
   }
+  if (mode === "docker_container") {
+    return I18nKey.COMMON$WORKSPACE_MODE_DOCKER_CONTAINER;
+  }
+  if (mode === "docker_worktree") {
+    return I18nKey.COMMON$WORKSPACE_MODE_DOCKER_WORKTREE;
+  }
   return backendKind === "cloud"
     ? I18nKey.COMMON$WORKSPACE_MODE_CLOUD_REPO
     : I18nKey.COMMON$WORKSPACE_MODE_LOCAL_REPO;
+}
+
+/** The second line of a container mode in the selector; host modes have none. */
+export function getWorkspaceModeHintI18nKey(
+  mode: WorkspaceMode,
+): I18nKey | null {
+  if (mode === "docker_container") {
+    return I18nKey.COMMON$WORKSPACE_MODE_DOCKER_HINT;
+  }
+  if (mode === "docker_worktree") {
+    return I18nKey.COMMON$WORKSPACE_MODE_DOCKER_WORKTREE_HINT;
+  }
+  return null;
 }

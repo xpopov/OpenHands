@@ -15,10 +15,29 @@ import { v4 as uuidv4 } from "uuid";
 import { AgentKind, Provider } from "#/types/settings";
 import type { ConversationRuntimeContext } from "#/api/conversation-file-upload.api";
 import { getAgentServerWorkingDir } from "../agent-server-config";
+import i18n from "#/i18n";
+import { I18nKey } from "#/i18n/declaration";
 import {
+  ConversationRuntimePolicyError,
+  isContainerWorkspaceMode,
+  MIN_AGENT_SERVER_VERSION_FOR_DOCKER_WORKTREE,
+  planConversationRuntime,
+  WORKSPACE_MODE_TAG_KEY,
+  type ParentRuntime,
+  type RuntimePlan,
+  type RuntimePolicyRefusal,
+  type ServerRuntimes,
+} from "#/utils/workspace-mode";
+import {
+  folderHasGitHistory,
+  getServerRuntimes,
+  ISOLATED_WORKSPACE_DIR,
+  requireConversationServerInfo,
   resolveConversationHooksProjectDir,
   resolveNewConversationWorkspace,
+  supportsDockerWorktree,
 } from "../conversation-workspace";
+import { displayErrorToast } from "#/utils/custom-toast-handlers";
 import HooksService from "../hooks-service";
 import {
   getActiveBackend,
@@ -61,6 +80,7 @@ import SettingsService from "../settings-service/settings-service.api";
 import { getTelemetryDistinctId } from "../../services/telemetry";
 import {
   ConversationMetadata,
+  getConversationWorkspaceMode,
   getStoredConversationMetadata,
   mergeStoredConversationMetadata,
   removeStoredConversationMetadata,
@@ -97,6 +117,47 @@ const INVALID_CONVERSATION_RESPONSE_MESSAGE =
   "Unable to load conversations because the selected agent server returned " +
   "data this UI does not understand. Check the backend URL/session key and " +
   "update the agent server if needed.";
+const RUNTIME_REFUSAL_MESSAGE_KEYS: Record<RuntimePolicyRefusal, I18nKey> = {
+  docker_unavailable: I18nKey.HOME$DOCKER_UNAVAILABLE,
+  docker_parent: I18nKey.CONVERSATION$DOCKER_PARENT_UNSUPPORTED,
+  local_disallowed: I18nKey.CONVERSATION$LOCAL_CONVERSATIONS_DISALLOWED,
+  docker_worktree_unsupported: I18nKey.HOME$DOCKER_WORKTREE_UNSUPPORTED,
+  docker_worktree_needs_folder: I18nKey.HOME$DOCKER_WORKTREE_NEEDS_GIT,
+  docker_worktree_needs_git: I18nKey.HOME$DOCKER_WORKTREE_NEEDS_GIT,
+};
+
+function runtimePolicyError(
+  refusal: RuntimePolicyRefusal,
+): ConversationRuntimePolicyError {
+  return new ConversationRuntimePolicyError(
+    refusal,
+    i18n.t(RUNTIME_REFUSAL_MESSAGE_KEYS[refusal], {
+      version: MIN_AGENT_SERVER_VERSION_FOR_DOCKER_WORKTREE,
+    }),
+  );
+}
+
+function requireRuntimePlan(
+  input: Parameters<typeof planConversationRuntime>[0],
+): RuntimePlan {
+  const result = planConversationRuntime(input);
+  if (result.ok) return result.plan;
+  throw runtimePolicyError(result.refusal);
+}
+
+function parentRuntimeOf(
+  parentConversationId: string,
+  parent: AppConversation | null | undefined,
+  server: ServerRuntimes,
+): ParentRuntime {
+  if (server === "docker_only") return "container";
+  return isContainerWorkspaceMode(
+    getConversationWorkspaceMode(parentConversationId, parent?.tags),
+  )
+    ? "container"
+    : "host";
+}
+
 function invalidConversationResponse(): Error {
   return new Error(INVALID_CONVERSATION_RESPONSE_MESSAGE);
 }
@@ -607,15 +668,30 @@ class AgentServerConversationService {
       agentLlmProfileRef,
     );
     const conversationId = uuidv4();
+    const info = await requireConversationServerInfo();
+    const server = getServerRuntimes(info);
+    const plan = requireRuntimePlan({
+      requestedMode: workspaceMode,
+      hasWorkingDir: !!workingDirOverride,
+      server,
+      allowLocal: settings.allow_local_conversations !== false,
+      dockerWorktreeSupported: supportsDockerWorktree(info),
+      parent: await this.resolveParentRuntime(parentConversationId, server),
+    });
     const { workingDir, hooksProjectDir } =
       await resolveNewConversationWorkspace({
         conversationId,
+        info,
         workingDir: workingDirOverride,
         selectedRepository: metadata?.selected_repository,
-        parentConversationId,
+        inContainer: plan.inContainer,
       });
-    const resolvedWorkspaceMode =
-      workspaceMode ?? (workingDirOverride ? "local_repo" : "new_worktree");
+    if (
+      plan.mode === "docker_worktree" &&
+      !(await folderHasGitHistory(workingDir))
+    ) {
+      throw runtimePolicyError("docker_worktree_needs_git");
+    }
 
     // Use encrypted settings to avoid exposing secrets in the browser
     const payload = await buildStartConversationRequestWithEncryptedSettings({
@@ -633,7 +709,7 @@ class AgentServerConversationService {
       parentConversationId,
       workingDir,
       hooksProjectDir,
-      worktree: resolvedWorkspaceMode === "new_worktree",
+      worktree: plan.worktree,
       agentProfileId,
       agentProfileKind,
       llmProfileOverride: agentLlmProfileOverride,
@@ -646,7 +722,10 @@ class AgentServerConversationService {
     // sidebar grouping survives on another browser, device, or after cleared
     // localStorage (#17386). localStorage below stays the warm cache for the
     // creating client.
-    const workspaceTags = buildWorkspaceTags(workingDirOverride);
+    const workspaceTags = {
+      ...buildWorkspaceTags(workingDirOverride),
+      ...(plan.inContainer ? { [WORKSPACE_MODE_TAG_KEY]: plan.mode } : {}),
+    };
     if (Object.keys(workspaceTags).length > 0) {
       const existingTags =
         payload.tags && typeof payload.tags === "object"
@@ -660,12 +739,33 @@ class AgentServerConversationService {
       getAgentServerClientOptions({ timeout: CREATE_CONVERSATION_TIMEOUT_MS }),
     ).createConversation<DirectConversationInfo>({
       ...payload,
+      ...(plan.conversationRuntime
+        ? { conversation_runtime: plan.conversationRuntime }
+        : {}),
       ...(telemetryDistinctId ? { user_id: telemetryDistinctId } : {}),
     });
     const localBackend = getEffectiveLocalBackend();
     if (!localBackend) throw new NoBackendAvailableError();
 
-    if (metadata?.selected_repository || workingDirOverride) {
+    // The agent-server runs a non-repo or unborn-HEAD folder in place
+    // instead of failing the Docker Worktree start.
+    let recordedMode = plan.mode;
+    const startedDir = data.workspace?.working_dir;
+    if (
+      plan.mode === "docker_worktree" &&
+      (startedDir === workingDir || startedDir === ISOLATED_WORKSPACE_DIR)
+    ) {
+      recordedMode = "docker_container";
+      displayErrorToast(i18n.t(I18nKey.HOME$DOCKER_WORKTREE_NOT_CREATED));
+    }
+
+    // A Docker conversation is recorded even without a workspace: hooks and
+    // restarts read its workspace_mode.
+    if (
+      metadata?.selected_repository ||
+      workingDirOverride ||
+      plan.inContainer
+    ) {
       // The agent-server runtime has no concept of selected repo/branch/
       // workspace, so persist the home-page selection client-side.
       // `toAppConversation` reads the repo/branch fields back to hydrate
@@ -677,7 +777,7 @@ class AgentServerConversationService {
         selected_branch: metadata?.selected_branch ?? null,
         git_provider: metadata?.git_provider ?? null,
         selected_workspace: workingDirOverride ?? null,
-        workspace_mode: resolvedWorkspaceMode,
+        workspace_mode: recordedMode,
       });
     }
 
@@ -707,9 +807,20 @@ class AgentServerConversationService {
       throw new Error("Local planning conversations require a local backend.");
     }
 
-    const [parent] = await this.batchGetAppConversations([
-      parentConversationId,
+    const info = await requireConversationServerInfo();
+    const server = getServerRuntimes(info);
+    const [[parent], settings] = await Promise.all([
+      this.batchGetAppConversations([parentConversationId]),
+      SettingsService.getSettings(),
     ]);
+    const plan = requireRuntimePlan({
+      requestedMode: "local_repo",
+      hasWorkingDir: true,
+      server,
+      allowLocal: settings.allow_local_conversations !== false,
+      dockerWorktreeSupported: supportsDockerWorktree(info),
+      parent: parentRuntimeOf(parentConversationId, parent, server),
+    });
     const workingDir =
       parent?.workspace?.working_dir ?? getAgentServerWorkingDir();
 
@@ -741,7 +852,12 @@ class AgentServerConversationService {
 
     const data = await new ConversationClient(
       getAgentServerClientOptions(),
-    ).createConversation<DirectConversationInfo>(payload);
+    ).createConversation<DirectConversationInfo>({
+      ...payload,
+      ...(plan.conversationRuntime
+        ? { conversation_runtime: plan.conversationRuntime }
+        : {}),
+    });
 
     // Client-side fallback only: agent-servers >= 1.37.1 persist the link via
     // `parent_conversation_id` and hand it back on the parent's
@@ -863,6 +979,21 @@ class AgentServerConversationService {
         sessionApiKey,
       }),
     ).getStatus();
+  }
+
+  /** Whether a new conversation's parent runs in a container (`"none"` without one). */
+  static async resolveParentRuntime(
+    parentConversationId: string | undefined,
+    server: ServerRuntimes,
+  ): Promise<ParentRuntime> {
+    if (!parentConversationId) return "none";
+    // P1/P2 ignore the parent on a host-only server: skip the lookup.
+    if (server === "host_only") return "host";
+    if (server === "docker_only") return "container";
+    const [parent] = await this.batchGetAppConversations([
+      parentConversationId,
+    ]);
+    return parentRuntimeOf(parentConversationId, parent, server);
   }
 
   static async resolveConversationWorkingDir(
@@ -988,8 +1119,10 @@ class AgentServerConversationService {
     if (!conversationId || !getEffectiveLocalBackend()) {
       return emptyHooksResponse();
     }
+    const metadata = getStoredConversationMetadata(conversationId);
     const projectDir = await resolveConversationHooksProjectDir(
-      getStoredConversationMetadata(conversationId)?.selected_workspace,
+      metadata?.selected_workspace,
+      isContainerWorkspaceMode(metadata?.workspace_mode),
     );
     if (projectDir === null) return emptyHooksResponse();
     return toHooksResponse(await HooksService.fetchWorkspaceHooks(projectDir));

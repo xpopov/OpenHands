@@ -159,6 +159,8 @@ export type Settings = {
   enabled_skills?: string[];
   /** Global agent behavior has been copied into the `default` agent profile. */
   default_profile_migrated?: boolean;
+  /** Absent means on; only an explicit `false` turns local runs off. */
+  allow_local_conversations?: boolean;
   max_budget_per_task: number | null;
   email?: string;
   email_verified?: boolean;

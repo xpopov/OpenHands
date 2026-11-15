@@ -19,8 +19,15 @@ import {
   setStoredConversationMetadata,
 } from "#/api/conversation-metadata-store";
 import type { Backend } from "#/api/backend-registry/types";
-import { clearCachedAgentServerInfo } from "#/api/agent-server-compatibility";
+import {
+  AgentServerUnavailableError,
+  clearCachedAgentServerInfo,
+} from "#/api/agent-server-compatibility";
+import { ConversationRuntimePolicyError } from "#/utils/workspace-mode";
 import AgentServerConversationService from "#/api/conversation-service/agent-server-conversation-service.api";
+import HooksService from "#/api/hooks-service";
+import i18n from "#/i18n";
+import { displayErrorToast } from "#/utils/custom-toast-handlers";
 import LLMSubscriptionService from "#/api/llm-subscription-service";
 import {
   LLM_AUTH_TYPE_SUBSCRIPTION,
@@ -122,6 +129,12 @@ vi.mock("#/api/agent-server-config", () => ({
   getLockedCloudAuthMode: vi.fn(() => "api-key"),
 }));
 
+// The fallback toast is a UI side effect this service test never renders.
+vi.mock("#/utils/custom-toast-handlers", () => ({
+  displayErrorToast: vi.fn(),
+  displaySuccessToast: vi.fn(),
+}));
+
 vi.mock("#/api/settings-service/settings-service.api", () => ({
   default: {
     getSettings: mockGetSettings,
@@ -157,6 +170,42 @@ const makeDirectConversation = (
   workspace: { working_dir: "/workspace/project/agent-canvas" },
   ...overrides,
 });
+
+const HYBRID_SERVER_INFO = {
+  version: "1.54.0",
+  conversation_runtime: "docker",
+  available_conversation_runtimes: ["local", "docker"],
+};
+const DOCKER_ONLY_SERVER_INFO = {
+  version: "1.54.0",
+  conversation_runtime: "docker",
+  available_conversation_runtimes: [],
+};
+
+const DOCKER_WORKTREE_SERVER_INFO = {
+  ...HYBRID_SERVER_INFO,
+  version: "1.61.0",
+};
+
+function useServerInfo(info: Record<string, unknown>) {
+  server.use(http.get("*/server_info", () => HttpResponse.json(info)));
+  clearCachedAgentServerInfo();
+}
+
+function mockLocalCreate(id = "ignored-server-id") {
+  mockGetSettings.mockResolvedValue({
+    agent_settings: { llm: { model: "gpt-4o" } },
+    conversation_settings: {},
+  });
+  mockGetSettingsForConversation.mockResolvedValue({
+    agentSettings: { llm: { model: "gpt-4o" } },
+    conversationSettings: {},
+    secretsEncrypted: true,
+  });
+  mockHttpPost.mockResolvedValue({
+    data: { id, created_at: "2024-01-01", updated_at: "2024-01-01" },
+  });
+}
 
 const message = {
   role: "user" as const,
@@ -939,6 +988,538 @@ describe("AgentServerConversationService", () => {
       };
       expect(payload.workspace.working_dir).toBe("/Users/jane/projects/foo");
       expect(payload.worktree).toBe(true);
+    });
+
+    it("asks for the docker runtime in docker-container mode", async () => {
+      useServerInfo(HYBRID_SERVER_INFO);
+      const loadWorkspaceHooks = vi.spyOn(HooksService, "loadWorkspaceHooks");
+      mockGetSettings.mockResolvedValue({
+        agent_settings: { llm: { model: "gpt-4o" } },
+        conversation_settings: {},
+      });
+      mockGetSettingsForConversation.mockResolvedValue({
+        agentSettings: { llm: { model: "gpt-4o" } },
+        conversationSettings: {},
+        secretsEncrypted: true,
+      });
+      mockHttpPost.mockResolvedValue({
+        data: {
+          id: "ignored-server-id",
+          created_at: "2024-01-01",
+          updated_at: "2024-01-01",
+        },
+      });
+
+      await AgentServerConversationService.createConversation({
+        agentProfileId: "profile-1",
+        workingDirOverride: "/Users/jane/projects/foo",
+        workspaceMode: "docker_container",
+      });
+
+      const [payloadCall] = mockHttpPost.mock.calls;
+      const payload = payloadCall[1] as {
+        workspace: { working_dir: string };
+        worktree: boolean;
+        conversation_runtime?: string;
+      };
+      expect(payload.workspace.working_dir).toBe("/Users/jane/projects/foo");
+      expect(payload.worktree).toBe(false);
+      expect(payload.conversation_runtime).toBe("docker");
+      // The container sees the attached folder, so its hooks apply.
+      expect(loadWorkspaceHooks).toHaveBeenCalledWith(
+        "/Users/jane/projects/foo",
+      );
+    });
+
+    it("records a docker conversation started without a workspace", async () => {
+      useServerInfo(HYBRID_SERVER_INFO);
+      mockGetSettings.mockResolvedValue({
+        agent_settings: { llm: { model: "gpt-4o" } },
+        conversation_settings: {},
+      });
+      mockGetSettingsForConversation.mockResolvedValue({
+        agentSettings: { llm: { model: "gpt-4o" } },
+        conversationSettings: {},
+        secretsEncrypted: true,
+      });
+      mockHttpPost.mockResolvedValue({
+        data: {
+          id: "docker-no-workspace",
+          created_at: "2024-01-01",
+          updated_at: "2024-01-01",
+        },
+      });
+
+      const created = await AgentServerConversationService.createConversation({
+        agentProfileId: "profile-1",
+        workspaceMode: "docker_container",
+      });
+
+      // Hooks and restarts read it to keep the conversation in its container.
+      expect(getStoredConversationMetadata(created.id)?.workspace_mode).toBe(
+        "docker_container",
+      );
+    });
+
+    it("asks a server offering both runtimes for the local one in a host mode", async () => {
+      server.use(
+        http.get("*/server_info", () =>
+          HttpResponse.json({
+            version: "1.54.0",
+            conversation_runtime: "docker",
+            available_conversation_runtimes: ["local", "docker"],
+          }),
+        ),
+      );
+      clearCachedAgentServerInfo();
+      mockGetSettings.mockResolvedValue({
+        agent_settings: { llm: { model: "gpt-4o" } },
+        conversation_settings: {},
+      });
+      mockGetSettingsForConversation.mockResolvedValue({
+        agentSettings: { llm: { model: "gpt-4o" } },
+        conversationSettings: {},
+        secretsEncrypted: true,
+      });
+      mockHttpPost.mockResolvedValue({
+        data: {
+          id: "ignored-server-id",
+          created_at: "2024-01-01",
+          updated_at: "2024-01-01",
+        },
+      });
+
+      await AgentServerConversationService.createConversation({
+        agentProfileId: "profile-1",
+        workingDirOverride: "/Users/jane/projects/foo",
+        workspaceMode: "local_repo",
+      });
+
+      const [payloadCall] = mockHttpPost.mock.calls;
+      expect(payloadCall[1]).toMatchObject({ conversation_runtime: "local" });
+    });
+    describe("runtime policy", () => {
+      const postedBody = () =>
+        mockHttpPost.mock.calls[0][1] as {
+          workspace: { working_dir: string };
+          worktree: boolean;
+          conversation_runtime?: string;
+          tags?: Record<string, string>;
+        };
+      const parentConversation = (tags?: Record<string, string>) =>
+        mockHttpGet.mockResolvedValue({
+          data: [makeDirectConversation({ id: "parent", tags })],
+        });
+      const expectRefusal = async (start: Promise<unknown>, code: string) => {
+        await expect(start).rejects.toBeInstanceOf(
+          ConversationRuntimePolicyError,
+        );
+        await expect(start).rejects.toMatchObject({ code });
+        expect(mockHttpPost).not.toHaveBeenCalled();
+      };
+
+      beforeEach(() => {
+        window.localStorage.clear();
+        mockLocalCreate();
+      });
+
+      it("mounts a picked folder with its hooks on a Docker-only server", async () => {
+        useServerInfo(DOCKER_ONLY_SERVER_INFO);
+        const hookConfig = {
+          pre_tool_use: [{ matcher: "terminal", hooks: [] }],
+          post_tool_use: [],
+          user_prompt_submit: [],
+          session_start: [],
+          session_end: [],
+          stop: [],
+        };
+        const loadWorkspaceHooks = vi
+          .spyOn(HooksService, "loadWorkspaceHooks")
+          .mockResolvedValue(hookConfig);
+        await AgentServerConversationService.createConversation({
+          agentProfileId: "profile-1",
+          workingDirOverride: "/Users/jane/projects/foo",
+          workspaceMode: "new_worktree",
+        });
+        expect(loadWorkspaceHooks).toHaveBeenCalledWith(
+          "/Users/jane/projects/foo",
+        );
+        expect(postedBody()).toMatchObject({
+          worktree: false,
+          conversation_runtime: "docker",
+          workspace: { working_dir: "/Users/jane/projects/foo" },
+          hook_config: hookConfig,
+          tags: { workspacemode: "docker_container" },
+        });
+      });
+
+      it.each([undefined, "new_worktree"] as const)(
+        "starts Docker without a worktree on a Docker-only server (mode %s)",
+        async (workspaceMode) => {
+          useServerInfo(DOCKER_ONLY_SERVER_INFO);
+          await AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workspaceMode,
+          });
+          expect(postedBody()).toMatchObject({
+            worktree: false,
+            conversation_runtime: "docker",
+            workspace: { working_dir: "/workspace" },
+          });
+        },
+      );
+
+      it("refuses a child of a stored Docker parent", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        setStoredConversationMetadata("parent", {
+          selected_repository: null,
+          selected_branch: null,
+          git_provider: null,
+          workspace_mode: "docker_container",
+        });
+        parentConversation();
+        await expectRefusal(
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride: "/Users/jane/projects/foo",
+            parentConversationId: "parent",
+          }),
+          "docker_parent",
+        );
+      });
+
+      it("refuses a child of a parent tagged Docker in another browser", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        parentConversation({ workspacemode: "docker_container" });
+        await expectRefusal(
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride: "/Users/jane/projects/foo",
+            parentConversationId: "parent",
+          }),
+          "docker_parent",
+        );
+      });
+
+      it("starts a child of a host parent on the local runtime", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        parentConversation();
+        await AgentServerConversationService.createConversation({
+          agentProfileId: "profile-1",
+          workingDirOverride: "/Users/jane/projects/foo",
+          workspaceMode: "new_worktree",
+          parentConversationId: "parent",
+        });
+        expect(postedBody()).toMatchObject({
+          worktree: true,
+          conversation_runtime: "local",
+        });
+      });
+
+      it("refuses any child on a Docker-only server", async () => {
+        useServerInfo(DOCKER_ONLY_SERVER_INFO);
+        await expectRefusal(
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride: "/workspace",
+            parentConversationId: "parent",
+          }),
+          "docker_parent",
+        );
+      });
+
+      it("fails closed when server_info cannot be read", async () => {
+        server.use(http.get("*/server_info", () => HttpResponse.error()));
+        clearCachedAgentServerInfo();
+        await expect(
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+          }),
+        ).rejects.toBeInstanceOf(AgentServerUnavailableError);
+        expect(mockHttpPost).not.toHaveBeenCalled();
+      });
+
+      it("tags container starts with their mode and host starts not at all", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        await AgentServerConversationService.createConversation({
+          agentProfileId: "profile-1",
+          workspaceMode: "docker_container",
+        });
+        await AgentServerConversationService.createConversation({
+          agentProfileId: "profile-1",
+          workingDirOverride: "/Users/jane/projects/foo",
+          workspaceMode: "local_repo",
+        });
+        const [containerCall, hostCall] = mockHttpPost.mock.calls;
+        expect(containerCall[1].tags).toMatchObject({
+          workspacemode: "docker_container",
+        });
+        expect(hostCall[1].tags?.workspacemode).toBeUndefined();
+      });
+
+      it("refuses a planner for a Docker parent", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        parentConversation({ workspacemode: "docker_container" });
+        await expectRefusal(
+          AgentServerConversationService.createLocalPlanningConversation(
+            "parent",
+          ),
+          "docker_parent",
+        );
+      });
+
+      it("starts a planner for a host parent on the local runtime", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        parentConversation();
+        await AgentServerConversationService.createLocalPlanningConversation(
+          "parent",
+        );
+        expect(postedBody().conversation_runtime).toBe("local");
+      });
+
+      it("refuses a planner on a Docker-only server", async () => {
+        useServerInfo(DOCKER_ONLY_SERVER_INFO);
+        parentConversation();
+        await expectRefusal(
+          AgentServerConversationService.createLocalPlanningConversation(
+            "parent",
+          ),
+          "docker_parent",
+        );
+      });
+
+      describe("with local conversations off", () => {
+        beforeEach(() => {
+          useServerInfo(HYBRID_SERVER_INFO);
+          mockGetSettings.mockResolvedValue({
+            agent_settings: { llm: { model: "gpt-4o" } },
+            conversation_settings: {},
+            allow_local_conversations: false,
+          });
+        });
+
+        it("starts a picked folder without a mode in Docker", async () => {
+          await AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride: "/Users/jane/projects/foo",
+          });
+          expect(postedBody()).toMatchObject({
+            worktree: false,
+            conversation_runtime: "docker",
+            workspace: { working_dir: "/Users/jane/projects/foo" },
+            tags: { workspacemode: "docker_container" },
+          });
+        });
+
+        it("starts a /launch-style call without folder or mode in Docker", async () => {
+          await AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+          });
+          expect(postedBody()).toMatchObject({
+            worktree: false,
+            conversation_runtime: "docker",
+          });
+        });
+
+        it("refuses a child of a host parent", async () => {
+          parentConversation();
+          await expectRefusal(
+            AgentServerConversationService.createConversation({
+              agentProfileId: "profile-1",
+              workingDirOverride: "/Users/jane/projects/foo",
+              workspaceMode: "local_repo",
+              parentConversationId: "parent",
+            }),
+            "local_disallowed",
+          );
+        });
+
+        it("refuses a planner of a host parent", async () => {
+          parentConversation();
+          await expectRefusal(
+            AgentServerConversationService.createLocalPlanningConversation(
+              "parent",
+            ),
+            "local_disallowed",
+          );
+        });
+      });
+
+      describe("Docker Worktree", () => {
+        const FOLDER = "/Users/jane/projects/foo";
+        const commitsRequested: string[] = [];
+        const answerCommits = (commits: number, status = 200) =>
+          server.use(
+            http.get("*/api/git/commits", ({ request }) => {
+              commitsRequested.push(new URL(request.url).search);
+              if (status !== 200) return new HttpResponse(null, { status });
+              return HttpResponse.json({
+                commits: Array.from({ length: commits }, (_, i) => ({
+                  sha: String(i).repeat(40),
+                  short_sha: String(i).repeat(7),
+                  subject: "init",
+                  author: "Jane",
+                  timestamp: "2026-11-01T00:00:00Z",
+                })),
+                has_more: false,
+              });
+            }),
+          );
+        const startDockerWorktree = (workingDirOverride?: string) =>
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride,
+            workspaceMode: "docker_worktree",
+          });
+
+        beforeEach(() => {
+          commitsRequested.length = 0;
+        });
+
+        it.each([
+          ["hybrid", DOCKER_WORKTREE_SERVER_INFO],
+          ["Docker-only", { ...DOCKER_ONLY_SERVER_INFO, version: "1.61.0" }],
+        ] as const)(
+          "asks a %s server for a worktree in a container on the folder",
+          async (_label, info) => {
+            useServerInfo(info);
+            answerCommits(1);
+            const hookConfig = {
+              pre_tool_use: [{ matcher: "terminal", hooks: [] }],
+              post_tool_use: [],
+              user_prompt_submit: [],
+              session_start: [],
+              session_end: [],
+              stop: [],
+            };
+            const loadWorkspaceHooks = vi
+              .spyOn(HooksService, "loadWorkspaceHooks")
+              .mockResolvedValue(hookConfig);
+
+            const created = await startDockerWorktree(FOLDER);
+
+            expect(commitsRequested).toEqual([
+              "?path=%2FUsers%2Fjane%2Fprojects%2Ffoo&limit=1",
+            ]);
+            expect(loadWorkspaceHooks).toHaveBeenCalledWith(FOLDER);
+            expect(postedBody()).toMatchObject({
+              worktree: true,
+              conversation_runtime: "docker",
+              workspace: { working_dir: FOLDER },
+              hook_config: hookConfig,
+              tags: { workspacemode: "docker_worktree" },
+            });
+            expect(
+              getStoredConversationMetadata(created.id)?.workspace_mode,
+            ).toBe("docker_worktree");
+            expect(displayErrorToast).not.toHaveBeenCalled();
+          },
+        );
+
+        it.each(["1.60.2", "1.61.0-rc1", "unknown"])(
+          "refuses agent-server %s with the version it needs",
+          async (version) => {
+            useServerInfo({ ...HYBRID_SERVER_INFO, version });
+            answerCommits(1);
+            i18n.addResourceBundle(i18n.language, "openhands", {
+              HOME$DOCKER_WORKTREE_UNSUPPORTED: "needs {{version}}",
+            });
+            const start = startDockerWorktree(FOLDER);
+            await expectRefusal(start, "docker_worktree_unsupported");
+            await expect(start).rejects.toThrow("needs 1.61.0");
+            expect(commitsRequested).toEqual([]);
+          },
+        );
+
+        it("refuses without a folder", async () => {
+          useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+          await expectRefusal(
+            startDockerWorktree(),
+            "docker_worktree_needs_folder",
+          );
+        });
+
+        it.each([
+          ["a non-repo or unborn HEAD", 0, 200],
+          ["a server without the commits route", 0, 404],
+        ])("refuses %s", async (_label, commits, status) => {
+          useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+          answerCommits(commits, status);
+          await expectRefusal(
+            startDockerWorktree(FOLDER),
+            "docker_worktree_needs_git",
+          );
+        });
+
+        it.each([FOLDER, "/workspace"])(
+          "records a container and warns when the server ran in %s",
+          async (startedDir) => {
+            useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+            answerCommits(1);
+            mockHttpPost.mockResolvedValue({
+              data: {
+                id: "ignored-server-id",
+                created_at: "2024-01-01",
+                updated_at: "2024-01-01",
+                workspace: { working_dir: startedDir },
+              },
+            });
+
+            const created = await startDockerWorktree(FOLDER);
+
+            expect(postedBody().tags).toMatchObject({
+              workspacemode: "docker_worktree",
+            });
+            expect(
+              getStoredConversationMetadata(created.id)?.workspace_mode,
+            ).toBe("docker_container");
+            expect(displayErrorToast).toHaveBeenCalledWith(
+              "HOME$DOCKER_WORKTREE_NOT_CREATED",
+            );
+          },
+        );
+
+        it("keeps Docker Worktree when the server ran in a worktree", async () => {
+          useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+          answerCommits(1);
+          mockHttpPost.mockResolvedValue({
+            data: {
+              id: "ignored-server-id",
+              created_at: "2024-01-01",
+              updated_at: "2024-01-01",
+              workspace: {
+                working_dir: "/tmp/conversation-worktrees/abc/foo",
+              },
+            },
+          });
+
+          const created = await startDockerWorktree(FOLDER);
+
+          expect(
+            getStoredConversationMetadata(created.id)?.workspace_mode,
+          ).toBe("docker_worktree");
+          expect(displayErrorToast).not.toHaveBeenCalled();
+        });
+
+        it("refuses a child or planner of a Docker Worktree parent", async () => {
+          useServerInfo(DOCKER_WORKTREE_SERVER_INFO);
+          parentConversation({ workspacemode: "docker_worktree" });
+          await expectRefusal(
+            AgentServerConversationService.createConversation({
+              agentProfileId: "profile-1",
+              workingDirOverride: FOLDER,
+              parentConversationId: "parent",
+            }),
+            "docker_parent",
+          );
+          await expectRefusal(
+            AgentServerConversationService.createLocalPlanningConversation(
+              "parent",
+            ),
+            "docker_parent",
+          );
+        });
+      });
     });
   });
 
@@ -2349,6 +2930,23 @@ describe("AgentServerConversationService", () => {
           ],
         });
         // The workspace root, not the per-conversation worktree.
+        expect(projectDirs).toEqual(["/home/user/qa-hooks-repo"]);
+      });
+
+      it("lists the hooks of the folder a Docker conversation mounts", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        setStoredConversationMetadata("conv-1", {
+          selected_repository: null,
+          selected_branch: null,
+          git_provider: null,
+          selected_workspace: "/home/user/qa-hooks-repo",
+          workspace_mode: "docker_container",
+        });
+        const projectDirs = serveWorkspaceHooks({ hook_config: null });
+
+        await expect(
+          AgentServerConversationService.getHooks("conv-1"),
+        ).resolves.toEqual({ hooks: [] });
         expect(projectDirs).toEqual(["/home/user/qa-hooks-repo"]);
       });
 

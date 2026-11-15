@@ -13,6 +13,8 @@ interface HomeGitControlBarPreviewProps {
   branch?: Branch | null;
   provider?: Provider | null;
   workspaceMode: WorkspaceMode;
+  workspaceModes: WorkspaceMode[];
+  disabledWorkspaceModeReasons?: Partial<Record<WorkspaceMode, string>>;
   backendKind: BackendKind;
   onRepoClick: () => void;
   onWorkspaceModeChange: (mode: WorkspaceMode) => void;
@@ -24,6 +26,8 @@ export function HomeGitControlBarPreview({
   branch,
   provider,
   workspaceMode,
+  workspaceModes,
+  disabledWorkspaceModeReasons,
   backendKind,
   onRepoClick,
   onWorkspaceModeChange,
@@ -43,9 +47,11 @@ export function HomeGitControlBarPreview({
         workspaceName={workspaceName}
         onClick={onRepoClick}
       />
-      {workspace ? (
+      {workspace && workspaceModes.length > 1 ? (
         <WorkspaceModeSelector
           value={workspaceMode}
+          options={workspaceModes}
+          disabledReasons={disabledWorkspaceModeReasons}
           backendKind={backendKind}
           onChange={onWorkspaceModeChange}
         />

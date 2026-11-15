@@ -246,16 +246,6 @@ export async function fetchBackendExecutionRuntime(): Promise<
 }
 
 /**
- * Return the deployment mode from the runtime services info, e.g. "docker",
- * "dev:automation", etc. Returns `null` when no runtime info is supplied.
- */
-export function getDeploymentMode(
-  runtimeServicesInfo?: RuntimeServicesInfo | null,
-): string | null {
-  return runtimeServicesInfo?.mode ?? null;
-}
-
-/**
  * Render the runtime services info into a markdown block suitable for
  * appending to the system prompt via `AgentContext.system_message_suffix`.
  *
@@ -517,9 +507,14 @@ interface LocalWorkspacePayload {
   working_dir: string;
 }
 
-const DOCKER_EXECUTION_WORKING_DIR = "/workspace";
+const DOCKER_EXECUTION_WORKING_DIR = "/workspace" as const;
 
-type WorkspacePayload = LocalWorkspacePayload;
+interface DockerExecutionWorkspacePayload {
+  kind: "DockerExecutionWorkspace";
+  working_dir: typeof DOCKER_EXECUTION_WORKING_DIR;
+}
+
+type WorkspacePayload = LocalWorkspacePayload | DockerExecutionWorkspacePayload;
 
 interface InitialMessagePayload {
   role: "user";
@@ -768,6 +763,39 @@ function getConversationSecurityAnalyzer(conversationSettings: SettingsRecord) {
   }
 }
 
+/**
+ * The Settings → Runtime options a start request carries. Only non-defaults
+ * are sent, so servers without the fields see the request they always did.
+ */
+function getConversationRuntimeOptions(conversationSettings: SettingsRecord) {
+  const {
+    worktree_base: base,
+    worktree_base_ref: ref,
+    worktree_branch_prefix: branchPrefix,
+    container_memory: memory,
+    container_cpus: cpus,
+    container_browser: browser,
+  } = conversationSettings;
+  const worktreeOptions = {
+    ...(typeof base === "string" && base !== "default_branch" ? { base } : {}),
+    ...(base === "ref" && typeof ref === "string" ? { ref } : {}),
+    ...(typeof branchPrefix === "string" && branchPrefix !== "openhands/"
+      ? { branch_prefix: branchPrefix }
+      : {}),
+  };
+  const container = {
+    ...(typeof memory === "string" && memory ? { memory } : {}),
+    ...(typeof cpus === "number" ? { cpus } : {}),
+    ...(browser === false ? { browser } : {}),
+  };
+  return {
+    ...(Object.keys(worktreeOptions).length > 0
+      ? { worktree_options: worktreeOptions }
+      : {}),
+    ...(Object.keys(container).length > 0 ? { container } : {}),
+  };
+}
+
 function buildInitialMessage(
   query?: string,
   conversationInstructions?: string,
@@ -918,15 +946,16 @@ function buildConfiguredConversationSettings(options: {
     (key) => delete conversationSettings[key],
   );
 
-  // On the docker runtime a host `working_dir` is bind-mounted at /workspace;
-  // only the literal /workspace gets a private, empty sandbox.
-  const workspace: WorkspacePayload = {
-    kind: "LocalWorkspace",
-    working_dir:
-      executionRuntime === "docker"
-        ? (workingDir ?? DOCKER_EXECUTION_WORKING_DIR)
-        : (workingDir ?? getAgentServerWorkingDir()),
-  };
+  const workspace: WorkspacePayload =
+    executionRuntime === "docker"
+      ? {
+          kind: "DockerExecutionWorkspace",
+          working_dir: DOCKER_EXECUTION_WORKING_DIR,
+        }
+      : {
+          kind: "LocalWorkspace",
+          working_dir: workingDir ?? getAgentServerWorkingDir(),
+        };
   const payload: ConversationSettingsPayload = {
     ...conversationSettings,
     workspace,
@@ -1135,7 +1164,11 @@ export function buildStartConversationRequest(
     ...(options.titleLlmProfile
       ? { title_llm_profile: options.titleLlmProfile }
       : {}),
-    worktree: options.worktree ?? true,
+    worktree:
+      options.executionRuntime === "docker"
+        ? false
+        : (options.worktree ?? true),
+    ...getConversationRuntimeOptions(conversationSettings),
   };
 
   // Stamp the client source tag so the agent-server can attribute the
@@ -1278,13 +1311,16 @@ export function buildStartPlanningConversationRequest(options: {
         keep_first: 6,
       },
     },
-    workspace: {
-      kind: "LocalWorkspace",
-      working_dir:
-        options.executionRuntime === "docker"
-          ? (options.workingDir ?? DOCKER_EXECUTION_WORKING_DIR)
-          : options.workingDir,
-    },
+    workspace:
+      options.executionRuntime === "docker"
+        ? {
+            kind: "DockerExecutionWorkspace",
+            working_dir: DOCKER_EXECUTION_WORKING_DIR,
+          }
+        : {
+            kind: "LocalWorkspace",
+            working_dir: options.workingDir,
+          },
     // No Canvas UI client tool: the planner's only output is PLAN.md, which the
     // Planner tab surfaces on its own via PlanningFileEditorObservation. Handing
     // it the panel-control tool would only let it navigate the right-side panel

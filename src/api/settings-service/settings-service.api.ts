@@ -44,6 +44,7 @@ export const APP_PREFERENCE_FIELDS = [
   "workspace_file_discovery",
   "home_pinned_automations",
   "default_profile_migrated",
+  "allow_local_conversations",
 ] as const;
 
 export type AppPreferenceField = (typeof APP_PREFERENCE_FIELDS)[number];

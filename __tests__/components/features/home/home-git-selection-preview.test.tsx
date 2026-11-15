@@ -109,6 +109,7 @@ function createPreviewProps(
     branch: createBranch(),
     provider: "github",
     workspaceMode: "local_repo",
+    workspaceModes: ["local_repo", "new_worktree"],
     backendKind: "local",
     onRepoClick: vi.fn(),
     onWorkspaceModeChange: vi.fn(),
@@ -154,6 +155,18 @@ describe("home git selection preview", () => {
 
     expect(props.onRepoClick).toHaveBeenCalledOnce();
     expect(props.onWorkspaceModeChange).toHaveBeenCalledWith("new_worktree");
+  });
+
+  it("hides the mode selector when only one mode is offered", () => {
+    render(
+      <HomeGitControlBarPreview
+        {...createPreviewProps({ workspaceModes: ["docker_container"] })}
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("workspace-mode-preview"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps only the repository control when there is no selection", () => {

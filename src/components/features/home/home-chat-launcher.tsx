@@ -1,4 +1,5 @@
 import { useConversationWorkspace } from "#/hooks/query/use-conversation-workspace";
+import { useFolderHasGitHistory } from "#/hooks/query/use-folder-has-git-history";
 import { useEffect, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
@@ -31,9 +32,15 @@ import {
 import { getApiErrorMessage } from "#/utils/api-error-message";
 import { getWorkspacesUnsupportedMessage } from "#/utils/workspaces-compatibility";
 import {
+  ALL_WORKSPACE_MODES,
+  getDefaultWorkspaceMode,
+  getWorkspaceModeOptions,
+  isContainerWorkspaceMode,
   readStoredLocalWorkspaceMode,
   writeStoredLocalWorkspaceMode,
 } from "#/utils/workspace-mode";
+import { useSettings } from "#/hooks/query/use-settings";
+import { WorkspaceModeSelector } from "#/components/features/chat/workspace-mode-selector";
 import type { PluginSpec } from "#/api/conversation-service/agent-server-conversation-service.types";
 import { markAutomationSetupHandoff } from "#/api/automation-setup-handoff-store";
 import { PluginPickerModal } from "#/components/features/plugins/plugin-picker-modal";
@@ -66,9 +73,10 @@ export function HomeChatLauncher() {
     useState<GitRepository | null>(null);
   const [pendingBranch, setPendingBranch] = useState<Branch | null>(null);
   const [pendingProvider, setPendingProvider] = useState<Provider | null>(null);
-  const [workspaceMode, setWorkspaceModeState] = useState<WorkspaceMode>(() =>
-    readStoredLocalWorkspaceMode(),
-  );
+  const { data: settings } = useSettings();
+  const [lastUsedWorkspaceMode] = useState(readStoredLocalWorkspaceMode);
+  const [pickedWorkspaceMode, setPickedWorkspaceMode] =
+    useState<WorkspaceMode | null>(null);
   const isRecommendedAutomationsDismissed =
     useHomeRecommendedAutomationsDismissed();
   const [selectedPlugins, setSelectedPlugins] = useState<PluginSpec[]>([]);
@@ -109,14 +117,60 @@ export function HomeChatLauncher() {
   const homeLlmProfile = useModelStore((s) => s.homeLlmProfile);
   const { data: llmProfiles } = useLlmProfiles();
   const { error: workspacesError } = useLocalWorkspaces({ enabled: isLocal });
-  const { isolated, unsupportedMessage: runtimeWorkspaceMessage } =
-    useConversationWorkspace();
+  const {
+    isolated,
+    dockerSelectable,
+    dockerAvailable,
+    dockerWorktreeSupported,
+    serverInfoLoading,
+    unsupportedMessage: runtimeWorkspaceMessage,
+  } = useConversationWorkspace();
+  // Fail closed: until settings load, a hybrid server offers no local modes.
+  const allowLocal =
+    settings !== undefined && settings.allow_local_conversations !== false;
+  const workspaceModes = getWorkspaceModeOptions({
+    local: !isolated && (!dockerSelectable || allowLocal),
+    docker: dockerAvailable,
+    dockerWorktree: dockerAvailable && dockerWorktreeSupported,
+    hasWorkspace: !isLocal || !!pendingWorkspace,
+  });
+  const dockerWorktreeOffered = workspaceModes.includes("docker_worktree");
+  const folderGitHistory = useFolderHasGitHistory(
+    pendingWorkspace?.path,
+    isLocal && dockerWorktreeOffered,
+  );
+  const disabledWorkspaceModeReasons: Partial<Record<WorkspaceMode, string>> =
+    dockerWorktreeOffered &&
+    (folderGitHistory.data === false || folderGitHistory.isError)
+      ? { docker_worktree: t(I18nKey.HOME$DOCKER_WORKTREE_NEEDS_GIT) }
+      : {};
+  const disabledWorkspaceModes = Object.keys(
+    disabledWorkspaceModeReasons,
+  ) as WorkspaceMode[];
+  // Picked here > Settings → Runtime default > last used in this browser >
+  // first offered. While server_info is pending the offered modes are
+  // unknown, so a remembered Docker choice is kept rather than turned into
+  // Local (a server that cannot run it rejects the start).
+  const candidateModes = serverInfoLoading
+    ? ALL_WORKSPACE_MODES
+    : workspaceModes;
+  const effectiveWorkspaceMode =
+    pickedWorkspaceMode &&
+    candidateModes.includes(pickedWorkspaceMode) &&
+    !disabledWorkspaceModes.includes(pickedWorkspaceMode)
+      ? pickedWorkspaceMode
+      : getDefaultWorkspaceMode(
+          isLocal ? settings?.conversation_settings?.default_runtime : null,
+          lastUsedWorkspaceMode,
+          candidateModes,
+          disabledWorkspaceModes,
+        );
   const workspacesUnsupportedMessage =
     runtimeWorkspaceMessage ??
     (isLocal ? getWorkspacesUnsupportedMessage(workspacesError, t) : null);
 
   const setWorkspaceMode = (mode: WorkspaceMode) => {
-    setWorkspaceModeState(mode);
+    setPickedWorkspaceMode(mode);
     if (isLocal) writeStoredLocalWorkspaceMode(mode);
   };
 
@@ -154,8 +208,11 @@ export function HomeChatLauncher() {
       variables = {
         ...variables,
         workingDir: pendingWorkspace.path,
-        workspaceMode,
+        workspaceMode: effectiveWorkspaceMode,
       };
+    } else if (isLocal && isContainerWorkspaceMode(effectiveWorkspaceMode)) {
+      // No workspace: the container gets its own, so only the runtime is sent.
+      variables = { ...variables, workspaceMode: effectiveWorkspaceMode };
     } else if (!isLocal && pendingRepository && pendingBranch) {
       variables = {
         ...variables,
@@ -326,7 +383,7 @@ export function HomeChatLauncher() {
         </div>
 
         {isolated && (
-          <p role="status" className="text-xs text-[var(--oh-text-secondary)]">
+          <p role="status" className="text-xs text-text-secondary">
             {pendingWorkspace
               ? t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE)
               : t(I18nKey.HOME$ISOLATED_WORKSPACE_NEW)}
@@ -355,7 +412,9 @@ export function HomeChatLauncher() {
               repository={pendingRepository}
               branch={pendingBranch}
               provider={pendingProvider}
-              workspaceMode={workspaceMode}
+              workspaceMode={effectiveWorkspaceMode}
+              workspaceModes={workspaceModes}
+              disabledWorkspaceModeReasons={disabledWorkspaceModeReasons}
               backendKind={backend.kind}
               onRepoClick={() => setIsDialogOpen(true)}
               onWorkspaceModeChange={setWorkspaceMode}
@@ -372,6 +431,14 @@ export function HomeChatLauncher() {
               disabledTooltip={workspacesUnsupportedMessage}
             />
           )}
+          {isLocal && !hasSelection && workspaceModes.length > 1 ? (
+            <WorkspaceModeSelector
+              value={effectiveWorkspaceMode}
+              options={workspaceModes}
+              backendKind={backend.kind}
+              onChange={setWorkspaceMode}
+            />
+          ) : null}
           <PluginPickerTrigger
             count={selectedPlugins.length}
             onClick={() => setIsPluginPickerOpen(true)}
@@ -413,7 +480,7 @@ export function HomeChatLauncher() {
             setPendingBranch(branch);
             setPendingProvider(provider ?? repository.git_provider);
             setPendingWorkspace(null);
-            setWorkspaceModeState("local_repo");
+            setPickedWorkspaceMode("local_repo");
           }}
         />
       )}

@@ -364,6 +364,46 @@ describe("SettingsService", () => {
   });
 
   // @spec WFD-002 — Workspace-scoped server persistence
+  it("stores allow_local_conversations as an app preference and reads it back flat", async () => {
+    const patchBodies: Array<Record<string, unknown>> = [];
+    server.use(
+      http.patch("*/api/settings", async ({ request }) => {
+        patchBodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({
+          agent_settings: {},
+          conversation_settings: {},
+          llm_api_key_is_set: false,
+          misc_settings: {
+            app_preferences: { allow_local_conversations: false },
+          },
+        });
+      }),
+      http.get("*/api/settings", () =>
+        HttpResponse.json({
+          agent_settings: {},
+          conversation_settings: {},
+          llm_api_key_is_set: false,
+          misc_settings: {
+            app_preferences: { allow_local_conversations: false },
+          },
+        }),
+      ),
+    );
+
+    await SettingsService.saveSettings({ allow_local_conversations: false });
+    SettingsService.invalidateCache();
+    const settings = await SettingsService.getSettings();
+
+    expect(patchBodies).toEqual([
+      {
+        misc_settings_diff: {
+          app_preferences: { allow_local_conversations: false },
+        },
+      },
+    ]);
+    expect(settings.allow_local_conversations).toBe(false);
+  });
+
   it("sends a sparse workspace preference patch and hydrates the saved options", async () => {
     const options = {
       ...DEFAULT_FILE_DISCOVERY,

@@ -6,6 +6,8 @@ import { useCreateConversation } from "#/hooks/mutation/use-create-conversation"
 import { useIsCreatingConversation } from "#/hooks/use-is-creating-conversation";
 import { useNavigation } from "#/context/navigation-context";
 import { useActiveConversation } from "#/hooks/query/use-active-conversation";
+import { getConversationWorkspaceMode } from "#/api/conversation-metadata-store";
+import { isContainerWorkspaceMode } from "#/utils/workspace-mode";
 import { useActiveBackend } from "#/contexts/active-backend-context";
 import { displayErrorToast } from "#/utils/custom-toast-handlers";
 
@@ -31,8 +33,25 @@ export function SkillInstallRestartBanner({
   const { navigate } = useNavigation();
   const { data: conversation } = useActiveConversation();
 
+  // A container installs into its mount of the host folder; without one the
+  // skill sits in a private workspace a new conversation would not get.
+  // A Docker Worktree installs into a worktree whose git dir only that
+  // container mounts, and its folder lacks the skill: no restart either.
+  const workspaceMode = conversationId
+    ? getConversationWorkspaceMode(conversationId, conversation?.tags)
+    : null;
+  const inContainer = isContainerWorkspaceMode(workspaceMode);
+  const hostFolder = conversation?.selected_workspace ?? undefined;
+
   // Local-only: the cloud create path ignores workingDir entirely.
-  if (backend.kind !== "local" || installs.length === 0) return null;
+  if (
+    backend.kind !== "local" ||
+    installs.length === 0 ||
+    workspaceMode === "docker_worktree" ||
+    (inContainer && !hostFolder)
+  ) {
+    return null;
+  }
 
   const latest = installs[installs.length - 1];
   const skillNames = installs
@@ -46,10 +65,10 @@ export function SkillInstallRestartBanner({
         // The agent's real install root, parsed from the fetch_skill.py
         // success line — correct even for worktree conversations where
         // selected_workspace would point elsewhere.
-        workingDir: latest.workspacePath,
+        workingDir: inContainer ? hostFolder : latest.workspacePath,
         // new_worktree would start from a fresh worktree without the
         // freshly installed .agents/skills/ directory.
-        workspaceMode: "local_repo",
+        workspaceMode: inContainer ? "docker_container" : "local_repo",
         repository:
           conversation?.selected_repository && conversation?.git_provider
             ? {

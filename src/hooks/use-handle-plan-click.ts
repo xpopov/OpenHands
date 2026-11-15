@@ -23,11 +23,12 @@ import {
 import { useSubConversations } from "#/hooks/query/use-sub-conversations";
 import { findPlannerConversationId } from "#/utils/plan-file";
 import { invalidateConversationQueries } from "#/hooks/mutation/conversation-mutation-utils";
+import { isConversationRuntimePolicyError } from "#/utils/workspace-mode";
 
 function useCreateLocalPlanningConversationMutation(options: {
   onCreated: (planningConversationId: string) => void;
   onInitialized: () => void;
-  onFailed: () => void;
+  onFailed: (error: Error) => void;
 }) {
   const queryClient = useQueryClient();
 
@@ -117,9 +118,13 @@ export const useHandlePlanClick = () => {
     // handlePlanClick sets conversationMode("plan") before this mutation
     // starts. On failure, back out of that mode instead of stranding the
     // user in plan mode with no planner to talk to.
-    onFailed: () => {
+    onFailed: (error) => {
       setConversationMode("code");
-      displayErrorToast(t(I18nKey.CONVERSATION$ERROR_STARTING_CONVERSATION));
+      displayErrorToast(
+        isConversationRuntimePolicyError(error)
+          ? error.message
+          : t(I18nKey.CONVERSATION$ERROR_STARTING_CONVERSATION),
+      );
     },
   });
 

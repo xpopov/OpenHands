@@ -1,7 +1,11 @@
 import { useCallback } from "react";
 import { useIsMutating } from "@tanstack/react-query";
 import type { AgentProfileSummary } from "#/api/agent-profiles-service/agent-profiles-service.api";
-import { getStoredConversationMetadata } from "#/api/conversation-metadata-store";
+import {
+  getConversationWorkspaceMode,
+  getStoredConversationMetadata,
+} from "#/api/conversation-metadata-store";
+import { isContainerWorkspaceMode } from "#/utils/workspace-mode";
 import { useNavigation } from "#/context/navigation-context";
 import { useAgentProfiles } from "#/hooks/query/use-agent-profiles";
 import { useActiveConversation } from "#/hooks/query/use-active-conversation";
@@ -65,6 +69,9 @@ export function useChatInputProfileState(): ChatInputProfileState {
       const metadata = conversationId
         ? getStoredConversationMetadata(conversationId)
         : null;
+      const workspaceMode = conversationId
+        ? getConversationWorkspaceMode(conversationId, conversation?.tags)
+        : null;
       const variables: CreateConversationVariables = {
         agentProfileId: profile.id,
         entryPoint: "blank_conversation_profile_picker",
@@ -77,8 +84,11 @@ export function useChatInputProfileState(): ChatInputProfileState {
         };
       }
       if (conversation?.selected_workspace) {
+        // A Docker Worktree relaunches as one: a fresh worktree of the folder.
         variables.workingDir = conversation.selected_workspace;
-        variables.workspaceMode = metadata?.workspace_mode ?? "local_repo";
+        variables.workspaceMode = workspaceMode ?? "local_repo";
+      } else if (isContainerWorkspaceMode(workspaceMode)) {
+        variables.workspaceMode = "docker_container";
       }
       if (metadata?.plugins?.length) {
         variables.plugins = metadata.plugins;

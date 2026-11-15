@@ -10,6 +10,7 @@ import {
   setStoredConversationMetadata,
 } from "#/api/conversation-metadata-store";
 import { getQueryClient } from "#/query-client-config";
+import { ConversationRuntimePolicyError } from "#/utils/workspace-mode";
 import { useGoalStore } from "#/stores/goal-store";
 import type { LaunchChildConversationAction } from "#/types/agent-server/core";
 import { isLaunchChildConversationActionEvent } from "#/types/agent-server/type-guards";
@@ -496,6 +497,33 @@ describe("handleLaunchChildConversationAction", () => {
       // this one shares the parent's directory after all.
       expect(result.status === "launched" && result.isolation_note).toContain(
         "not a valid object name",
+      );
+    });
+
+    it("reports a runtime policy refusal without a shared retry", async () => {
+      seedWorktreeCapableParent();
+      mockCreateConversation.mockRejectedValueOnce(
+        new ConversationRuntimePolicyError(
+          "docker_parent",
+          "Child and planner conversations cannot start from a Docker conversation.",
+        ),
+      );
+
+      await handleLaunchChildConversationAction(
+        action({}),
+        PARENT_ID,
+        nextToolCallId(),
+      );
+
+      expect(mockCreateConversation).toHaveBeenCalledTimes(1);
+      const result = reportedResult();
+      expect(result).toMatchObject({
+        status: "error",
+        error:
+          "Child and planner conversations cannot start from a Docker conversation.",
+      });
+      expect(result.status === "error" && result.guidance).toMatch(
+        /^Do not retry/,
       );
     });
 

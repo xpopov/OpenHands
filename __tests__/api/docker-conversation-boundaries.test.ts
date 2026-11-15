@@ -1,7 +1,7 @@
 import i18n from "#/i18n";
 import { I18nKey } from "#/i18n/declaration";
 import AgentServerGitService from "#/api/git-service/agent-server-git-service.api";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { server } from "#/mocks/node";
 import {
@@ -11,10 +11,13 @@ import {
 import { clearCachedAgentServerInfo } from "#/api/agent-server-compatibility";
 import { clearAgentServerHomeDirCache } from "#/api/agent-server-home";
 import {
+  requireConversationServerInfo,
   resolveConversationHooksProjectDir,
   resolveNewConversationWorkspace,
 } from "#/api/conversation-workspace";
-import GitService from "#/api/git-service/git-service.api";
+import SettingsService from "#/api/settings-service/settings-service.api";
+import type { Settings } from "#/types/settings";
+import { ConversationRuntimePolicyError } from "#/utils/workspace-mode";
 import AgentServerConversationService from "#/api/conversation-service/agent-server-conversation-service.api";
 import AgentServerRuntimeService from "#/api/runtime-service/agent-server-runtime-service";
 
@@ -23,6 +26,22 @@ const cid = "11111111-1111-4111-8111-111111111111";
 const paths: string[] = [];
 let isolated = true;
 let capabilities = true;
+
+const resolveWorkspace = async (
+  options: Omit<
+    Parameters<typeof resolveNewConversationWorkspace>[0],
+    "conversationId" | "info"
+  >,
+) =>
+  resolveNewConversationWorkspace({
+    conversationId: cid,
+    info: await requireConversationServerInfo(),
+    ...options,
+  });
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 beforeEach(() => {
   isolated = true;
@@ -104,9 +123,7 @@ describe("conversation runtime boundaries", () => {
   });
 
   it("uses a new isolated workspace without reading host home or hooks", async () => {
-    expect(
-      await resolveNewConversationWorkspace({ conversationId: cid }),
-    ).toEqual({
+    expect(await resolveWorkspace({})).toEqual({
       workingDir: "/workspace",
       hooksProjectDir: null,
       isolated: true,
@@ -114,65 +131,77 @@ describe("conversation runtime boundaries", () => {
     expect(paths).toEqual(["/server_info"]);
   });
 
-  it("lists no hooks for an isolated conversation without reading host hooks", async () => {
+  it("lists no hooks for an isolated conversation without a folder", async () => {
     expect(await AgentServerConversationService.getHooks(cid)).toEqual({
       hooks: [],
     });
     expect(paths).toEqual(["/server_info"]);
   });
 
-  it("bind-mounts a selected host folder and loads its hooks", async () => {
+  it.each([
+    ["/home/user/project", "/home/user/project"],
+    ["relative/project", "/home/agent/relative/project"],
+  ])(
+    "mounts selected host folder %s and reads its hooks",
+    async (workingDir, absolute) => {
+      expect(await resolveWorkspace({ workingDir })).toEqual({
+        workingDir: absolute,
+        hooksProjectDir: absolute,
+        isolated: true,
+      });
+    },
+  );
+
+  it.each([true, false])(
+    "refuses /workspace as a container folder (isolated server: %s)",
+    async (serverIsolated) => {
+      isolated = serverIsolated;
+      await expect(
+        resolveWorkspace({ workingDir: "/workspace", inContainer: true }),
+      ).rejects.toThrow(i18n.t(I18nKey.HOME$DOCKER_WORKSPACE_PATH_RESERVED));
+    },
+  );
+
+  it("reads hooks from the folder of a container run on a hybrid server", async () => {
+    isolated = false;
     expect(
-      await resolveNewConversationWorkspace({
-        conversationId: cid,
+      await resolveWorkspace({
         workingDir: "/home/user/project",
+        inContainer: true,
       }),
     ).toEqual({
       workingDir: "/home/user/project",
       hooksProjectDir: "/home/user/project",
-      isolated: true,
+      isolated: false,
     });
   });
 
-  it("resolves a relative host folder against the backend home", async () => {
+  it("reads no hooks for a container run without a folder on a hybrid server", async () => {
+    isolated = false;
     expect(
-      await resolveNewConversationWorkspace({
-        conversationId: cid,
-        workingDir: "relative/project",
-      }),
-    ).toEqual({
-      workingDir: "/home/agent/relative/project",
-      hooksProjectDir: "/home/agent/relative/project",
-      isolated: true,
-    });
+      (await resolveWorkspace({ inContainer: true })).hooksProjectDir,
+    ).toBeNull();
   });
 
-  it("treats a selected /workspace as the empty sandbox", async () => {
-    expect(
-      await resolveNewConversationWorkspace({
-        conversationId: cid,
-        workingDir: "/workspace",
-      }),
-    ).toEqual({
-      workingDir: "/workspace",
-      hooksProjectDir: null,
-      isolated: true,
-    });
-    expect(paths).toEqual(["/server_info"]);
-  });
-
-  it("resolves hooks of an existing conversation on its host folder", async () => {
-    expect(await resolveConversationHooksProjectDir("/home/user/project")).toBe(
-      "/home/user/project",
-    );
-    expect(await resolveConversationHooksProjectDir("/workspace")).toBeNull();
-    expect(await resolveConversationHooksProjectDir(null)).toBeNull();
-  });
+  it.each([
+    ["/home/user/project", true, true, "/home/user/project"],
+    ["/home/user/project", false, true, "/home/user/project"],
+    [null, true, false, null],
+    [null, false, true, null],
+    ["/workspace", false, true, null],
+  ] as const)(
+    "resolves the hooks dir of %s (container %s, isolated server %s)",
+    async (folder, inContainer, serverIsolated, expected) => {
+      isolated = serverIsolated;
+      expect(
+        await resolveConversationHooksProjectDir(folder, inContainer),
+      ).toBe(expected);
+    },
+  );
 
   it("rejects selected host repository metadata", async () => {
     await expect(
-      resolveNewConversationWorkspace({
-        conversationId: cid,
+      resolveWorkspace({
         selectedRepository: "owner/project",
       }),
     ).rejects.toThrow(i18n.t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE));
@@ -187,8 +216,7 @@ describe("conversation runtime boundaries", () => {
     try {
       await i18n.changeLanguage("fr");
       await expect(
-        resolveNewConversationWorkspace({
-          conversationId: cid,
+        resolveWorkspace({
           selectedRepository: "owner/project",
         }),
       ).rejects.toThrow(notice);
@@ -197,21 +225,27 @@ describe("conversation runtime boundaries", () => {
     }
   });
 
-  it("preserves a Docker child conversation's parent workspace", async () => {
+  it("refuses a child on a Docker-only server", async () => {
+    vi.spyOn(SettingsService, "getSettings").mockResolvedValue({} as Settings);
+    const start = AgentServerConversationService.createConversation({
+      agentProfileId: "profile-1",
+      workingDirOverride: "/workspace",
+      parentConversationId: "parent",
+    });
+    await expect(start).rejects.toBeInstanceOf(ConversationRuntimePolicyError);
+    await expect(start).rejects.toMatchObject({
+      code: "docker_parent",
+      message: i18n.t(I18nKey.CONVERSATION$DOCKER_PARENT_UNSUPPORTED),
+    });
     expect(
-      await resolveNewConversationWorkspace({
-        conversationId: cid,
-        parentConversationId: "parent",
-        workingDir: "/workspace",
-      }),
-    ).toMatchObject({ workingDir: "/workspace", isolated: true });
+      paths.filter((path) => path.startsWith("/api/conversations")),
+    ).toEqual([]);
   });
 
   it("uses host metadata rather than runtime_services deployment mode", async () => {
     isolated = false;
     expect(
-      await resolveNewConversationWorkspace({
-        conversationId: cid,
+      await resolveWorkspace({
         workingDir: "/home/user/project",
       }),
     ).toEqual({
@@ -219,18 +253,6 @@ describe("conversation runtime boundaries", () => {
       hooksProjectDir: "/home/user/project",
       isolated: false,
     });
-  });
-
-  it("routes legacy git service changes and diff to the conversation", async () => {
-    expect(await GitService.getGitChanges(cid)).toHaveLength(1);
-    expect(await GitService.getGitChangeDiff(cid, "file.txt")).toEqual({
-      original: "before",
-      modified: "after",
-    });
-    expect(paths).toContain(
-      `/api/conversations/${cid}/git/changes?path=%2Fworkspace`,
-    );
-    expect(paths).toContain(`/api/conversations/${cid}/git/diff?path=file.txt`);
   });
 
   it("routes plan downloads and runtime bash to the same conversation", async () => {
@@ -255,7 +277,7 @@ describe("conversation runtime boundaries", () => {
 
   it("retains cid for legacy servers without canonical capability", async () => {
     capabilities = false;
-    await GitService.getGitChangeDiff(cid, "file.txt");
+    await AgentServerGitService.getGitChangeDiff(cid, null, null, "file.txt");
     expect(paths).toContain(`/api/git/diff?path=file.txt&cid=${cid}`);
   });
 });
