@@ -1288,6 +1288,63 @@ describe("AgentServerConversationService", () => {
         );
       });
 
+      describe("with local conversations off", () => {
+        beforeEach(() => {
+          useServerInfo(HYBRID_SERVER_INFO);
+          mockGetSettings.mockResolvedValue({
+            agent_settings: { llm: { model: "gpt-4o" } },
+            conversation_settings: {},
+            allow_local_conversations: false,
+          });
+        });
+
+        it("starts a picked folder without a mode in Docker", async () => {
+          await AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride: "/Users/jane/projects/foo",
+          });
+          expect(postedBody()).toMatchObject({
+            worktree: false,
+            conversation_runtime: "docker",
+            workspace: { working_dir: "/Users/jane/projects/foo" },
+            tags: { workspacemode: "docker_container" },
+          });
+        });
+
+        it("starts a /launch-style call without folder or mode in Docker", async () => {
+          await AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+          });
+          expect(postedBody()).toMatchObject({
+            worktree: false,
+            conversation_runtime: "docker",
+          });
+        });
+
+        it("refuses a child of a host parent", async () => {
+          parentConversation();
+          await expectRefusal(
+            AgentServerConversationService.createConversation({
+              agentProfileId: "profile-1",
+              workingDirOverride: "/Users/jane/projects/foo",
+              workspaceMode: "local_repo",
+              parentConversationId: "parent",
+            }),
+            "local_disallowed",
+          );
+        });
+
+        it("refuses a planner of a host parent", async () => {
+          parentConversation();
+          await expectRefusal(
+            AgentServerConversationService.createLocalPlanningConversation(
+              "parent",
+            ),
+            "local_disallowed",
+          );
+        });
+      });
+
       describe("Docker Worktree", () => {
         const FOLDER = "/Users/jane/projects/foo";
         const commitsRequested: string[] = [];

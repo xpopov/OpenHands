@@ -1490,4 +1490,83 @@ describe("HomeChatLauncher Docker Worktree", () => {
       });
     },
   );
+
+  describe("with local conversations off", () => {
+    const localOff = (conversationSettings = {}) =>
+      vi.spyOn(SettingsService, "getSettings").mockResolvedValue({
+        ...MOCK_DEFAULT_USER_SETTINGS,
+        allow_local_conversations: false,
+        conversation_settings: conversationSettings,
+      });
+
+    beforeEach(() => {
+      useHybridServer(true);
+      vi.spyOn(AgentServerGitService, "getGitCommits").mockResolvedValue(
+        oneCommit,
+      );
+    });
+
+    it("offers only Docker modes for a picked folder", async () => {
+      localOff();
+      renderLauncher();
+      const user = userEvent.setup();
+
+      await pickFolder(user);
+      await waitFor(() =>
+        expect(screen.getByTestId("stub-workspace-modes")).toHaveTextContent(
+          /^docker_container,docker_worktree$/,
+        ),
+      );
+    });
+
+    it("turns a saved Local default into Docker", async () => {
+      localOff({ default_runtime: "local" });
+      renderLauncher();
+      const user = userEvent.setup();
+
+      await pickFolder(user);
+      await waitFor(() =>
+        expect(screen.getByTestId("stub-workspace-mode")).toHaveTextContent(
+          "local:docker_container",
+        ),
+      );
+    });
+
+    it("hides host modes while settings are still loading", async () => {
+      vi.spyOn(SettingsService, "getSettings").mockReturnValue(
+        new Promise(() => {}),
+      );
+      renderLauncher();
+      const user = userEvent.setup();
+
+      await pickFolder(user);
+      expect(screen.getByTestId("stub-workspace-modes")).toHaveTextContent(
+        /^docker_container,docker_worktree$/,
+      );
+    });
+
+    it("starts Docker without a selector when no folder is open", async () => {
+      localOff();
+      const createSpy = vi
+        .spyOn(AgentServerConversationService, "createConversation")
+        .mockResolvedValue(
+          makeConversationResponse({ app_conversation_id: "conv-off" }),
+        );
+      renderLauncher();
+      const user = userEvent.setup();
+
+      await waitFor(() =>
+        expect(SettingsService.getSettings).toHaveBeenCalled(),
+      );
+      expect(
+        screen.queryByTestId("workspace-mode-selector"),
+      ).not.toBeInTheDocument();
+      await user.click(screen.getByTestId("stub-chat-submit"));
+
+      await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
+      expect(createSpy.mock.calls[0]?.[0]).toMatchObject({
+        workspaceMode: "docker_container",
+      });
+    });
+  });
 });

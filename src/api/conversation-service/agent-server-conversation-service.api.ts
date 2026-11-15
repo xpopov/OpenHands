@@ -674,7 +674,7 @@ class AgentServerConversationService {
       requestedMode: workspaceMode,
       hasWorkingDir: !!workingDirOverride,
       server,
-      allowLocal: true,
+      allowLocal: settings.allow_local_conversations !== false,
       dockerWorktreeSupported: supportsDockerWorktree(info),
       parent: await this.resolveParentRuntime(parentConversationId, server),
     });
@@ -809,14 +809,15 @@ class AgentServerConversationService {
 
     const info = await requireConversationServerInfo();
     const server = getServerRuntimes(info);
-    const [parent] = await this.batchGetAppConversations([
-      parentConversationId,
+    const [[parent], settings] = await Promise.all([
+      this.batchGetAppConversations([parentConversationId]),
+      SettingsService.getSettings(),
     ]);
     const plan = requireRuntimePlan({
       requestedMode: "local_repo",
       hasWorkingDir: true,
       server,
-      allowLocal: true,
+      allowLocal: settings.allow_local_conversations !== false,
       dockerWorktreeSupported: supportsDockerWorktree(info),
       parent: parentRuntimeOf(parentConversationId, parent, server),
     });

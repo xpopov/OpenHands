@@ -119,13 +119,17 @@ export function HomeChatLauncher() {
   const { error: workspacesError } = useLocalWorkspaces({ enabled: isLocal });
   const {
     isolated,
+    dockerSelectable,
     dockerAvailable,
     dockerWorktreeSupported,
     serverInfoLoading,
     unsupportedMessage: runtimeWorkspaceMessage,
   } = useConversationWorkspace();
+  // Fail closed: until settings load, a hybrid server offers no local modes.
+  const allowLocal =
+    settings !== undefined && settings.allow_local_conversations !== false;
   const workspaceModes = getWorkspaceModeOptions({
-    local: !isolated,
+    local: !isolated && (!dockerSelectable || allowLocal),
     docker: dockerAvailable,
     dockerWorktree: dockerAvailable && dockerWorktreeSupported,
     hasWorkspace: !isLocal || !!pendingWorkspace,

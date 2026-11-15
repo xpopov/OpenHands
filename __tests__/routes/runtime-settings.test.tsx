@@ -1,16 +1,32 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsService from "#/api/settings-service/settings-service.api";
 import { MOCK_DEFAULT_USER_SETTINGS } from "#/mocks/handlers";
 import RuntimeSettingsScreen from "#/routes/runtime-settings";
-import type { SettingsValue } from "#/types/settings";
+import type { Settings, SettingsValue } from "#/types/settings";
 
 const mockUseConversationWorkspace = vi.hoisted(() => vi.fn());
 vi.mock("#/hooks/query/use-conversation-workspace", () => ({
   useConversationWorkspace: () => mockUseConversationWorkspace(),
 }));
+
+const backendKind = vi.hoisted(() => ({ value: "local" as "local" | "cloud" }));
+vi.mock("#/contexts/active-backend-context", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("#/contexts/active-backend-context")>();
+  return {
+    ...actual,
+    useActiveBackend: () => {
+      const active = actual.useActiveBackend();
+      return {
+        ...active,
+        backend: { ...active.backend, kind: backendKind.value },
+      };
+    },
+  };
+});
 
 const RUNTIME_OPTION_IDS = [
   "sdk-settings-worktree_base",
@@ -23,9 +39,11 @@ const RUNTIME_OPTION_IDS = [
 
 async function renderRuntimeOptions(
   conversationSettings: Record<string, SettingsValue>,
+  overrides: Partial<Settings> = {},
 ) {
   vi.spyOn(SettingsService, "getSettings").mockResolvedValue({
     ...MOCK_DEFAULT_USER_SETTINGS,
+    ...overrides,
     conversation_settings: conversationSettings,
   });
   const queryClient = new QueryClient({
@@ -40,8 +58,14 @@ async function renderRuntimeOptions(
   return RUNTIME_OPTION_IDS.filter((id) => screen.queryByTestId(id));
 }
 
+const defaultRuntimeChoices = async () => {
+  await userEvent.click(screen.getByTestId("sdk-settings-default_runtime"));
+  return screen.getAllByRole("option").map((option) => option.textContent);
+};
+
 describe("RuntimeSettingsScreen", () => {
   beforeEach(() => {
+    backendKind.value = "local";
     mockUseConversationWorkspace.mockReturnValue({
       dockerSelectable: true,
       serverInfoLoading: false,
@@ -106,6 +130,70 @@ describe("RuntimeSettingsScreen", () => {
       expect(
         screen.getByTestId("runtime-docker-unavailable"),
       ).toBeInTheDocument();
+    });
+  });
+
+  describe("Allow local conversations", () => {
+    it("shows the switch on a server offering both runtimes", async () => {
+      await renderRuntimeOptions({ default_runtime: "docker" });
+      expect(
+        screen.getByTestId("allow-local-conversations-switch"),
+      ).toBeChecked();
+    });
+
+    it.each([
+      ["a Docker-only or host-only server", "local", false],
+      ["a cloud backend", "cloud", true],
+    ] as const)(
+      "hides the switch on %s",
+      async (_label, kind, dockerSelectable) => {
+        backendKind.value = kind;
+        mockUseConversationWorkspace.mockReturnValue({
+          dockerSelectable,
+          serverInfoLoading: false,
+        });
+        await renderRuntimeOptions({ default_runtime: "local" });
+        expect(
+          screen.queryByTestId("allow-local-conversations-switch"),
+        ).not.toBeInTheDocument();
+      },
+    );
+
+    it("saves the switch as soon as it is toggled", async () => {
+      const saveSpy = vi
+        .spyOn(SettingsService, "saveSettings")
+        .mockResolvedValue(true);
+      await renderRuntimeOptions({ default_runtime: "docker" });
+      await userEvent.click(
+        screen.getByTestId("allow-local-conversations-switch"),
+      );
+      expect(saveSpy).toHaveBeenCalledWith({
+        allow_local_conversations: false,
+      });
+    });
+
+    it("hides the host runtimes when local conversations are off", async () => {
+      await renderRuntimeOptions(
+        { default_runtime: "docker" },
+        { allow_local_conversations: false },
+      );
+      expect(
+        screen.getByTestId("allow-local-conversations-switch"),
+      ).not.toBeChecked();
+      expect(await defaultRuntimeChoices()).toEqual([
+        "SCHEMA$DEFAULT_RUNTIME$CHOICE$DOCKER",
+      ]);
+    });
+
+    it("keeps a saved host runtime visible when local conversations are off", async () => {
+      await renderRuntimeOptions(
+        { default_runtime: "worktree" },
+        { allow_local_conversations: false },
+      );
+      expect(await defaultRuntimeChoices()).toEqual([
+        "SCHEMA$DEFAULT_RUNTIME$CHOICE$WORKTREE",
+        "SCHEMA$DEFAULT_RUNTIME$CHOICE$DOCKER",
+      ]);
     });
   });
 });
