@@ -34,6 +34,7 @@ import {
 import type { LaunchChildConversationAction } from "#/types/agent-server/core";
 import { buildAgentCanvasUrl } from "#/utils/base-path";
 import { claimClientToolCall } from "#/utils/claim-client-tool-call";
+import { isConversationRuntimePolicyError } from "#/utils/workspace-mode";
 import { postClientToolResult } from "./client-tool-result";
 import {
   displayErrorToast,
@@ -303,7 +304,12 @@ async function launchLocalChild(
   try {
     startTask = await createChild(isolation);
   } catch (worktreeError) {
-    if (isolation !== "worktree") throw worktreeError;
+    if (
+      isolation !== "worktree" ||
+      isConversationRuntimePolicyError(worktreeError)
+    ) {
+      throw worktreeError;
+    }
     // Creating the worktree is the one part of a local launch that can fail on
     // an otherwise healthy workspace, so retry without it rather than losing
     // the launch. Anything else fails both attempts and is reported as-is.
@@ -535,10 +541,15 @@ export async function handleLaunchChildConversationAction(
           ? await launchCloudChild(validation.params, parentConversationId)
           : await launchLocalChild(validation.params, parentConversationId);
     } catch (error) {
-      result = failure(
-        error instanceof Error ? error.message : String(error),
-        "The launch request failed. Report the error to the user; retry only if the cause looks transient.",
-      );
+      result = isConversationRuntimePolicyError(error)
+        ? failure(
+            error.message,
+            "Do not retry. Child conversations cannot start from this conversation; continue the task here.",
+          )
+        : failure(
+            error instanceof Error ? error.message : String(error),
+            "The launch request failed. Report the error to the user; retry only if the cause looks transient.",
+          );
     }
   }
 

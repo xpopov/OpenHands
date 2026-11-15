@@ -47,12 +47,127 @@ export function getDefaultWorkspaceMode(
 export const LAST_LOCAL_WORKSPACE_MODE_STORAGE_KEY =
   "openhands-last-local-workspace-mode";
 
-function isWorkspaceMode(value: string | null): value is WorkspaceMode {
+export function isWorkspaceMode(
+  value: string | null | undefined,
+): value is WorkspaceMode {
   return (
     value === "local_repo" ||
     value === "new_worktree" ||
     value === "docker_container"
   );
+}
+
+export function isContainerWorkspaceMode(
+  mode: WorkspaceMode | null | undefined,
+): boolean {
+  return mode === "docker_container";
+}
+
+export function isWorktreeWorkspaceMode(
+  mode: WorkspaceMode | null | undefined,
+): boolean {
+  return mode === "new_worktree";
+}
+
+/** Conversation tag recording a container conversation's mode for other browsers. */
+export const WORKSPACE_MODE_TAG_KEY = "workspacemode";
+
+export type ServerRuntimes = "host_only" | "docker_only" | "hybrid";
+export type ParentRuntime = "none" | "host" | "container";
+export type RuntimePolicyRefusal =
+  | "docker_unavailable"
+  | "docker_parent"
+  | "local_disallowed";
+
+export interface RuntimePlan {
+  mode: WorkspaceMode;
+  conversationRuntime?: "local" | "docker";
+  worktree: boolean;
+  inContainer: boolean;
+}
+
+export type RuntimePlanResult =
+  | { ok: true; plan: RuntimePlan }
+  | { ok: false; refusal: RuntimePolicyRefusal };
+
+export class ConversationRuntimePolicyError extends Error {
+  readonly code: RuntimePolicyRefusal;
+
+  constructor(code: RuntimePolicyRefusal, message: string) {
+    super(message);
+    this.name = "ConversationRuntimePolicyError";
+    this.code = code;
+  }
+}
+
+export const isConversationRuntimePolicyError = (
+  error: unknown,
+): error is ConversationRuntimePolicyError =>
+  error instanceof ConversationRuntimePolicyError;
+
+const hostPlan = (
+  mode: WorkspaceMode,
+  conversationRuntime: "local" | undefined,
+): RuntimePlanResult => ({
+  ok: true,
+  plan: {
+    mode,
+    conversationRuntime,
+    worktree: mode === "new_worktree",
+    inContainer: false,
+  },
+});
+
+const DOCKER_PLAN: RuntimePlanResult = {
+  ok: true,
+  plan: {
+    mode: "docker_container",
+    conversationRuntime: "docker",
+    worktree: false,
+    inContainer: true,
+  },
+};
+
+/**
+ * Where a new conversation runs, decided once for every Canvas start path.
+ * A container never receives `worktree: true`, a child or planner never
+ * leaves a container for the host, and a server without a local runtime
+ * gets Docker even for a host mode recorded elsewhere.
+ */
+export function planConversationRuntime(input: {
+  requestedMode?: WorkspaceMode;
+  hasWorkingDir: boolean;
+  server: ServerRuntimes;
+  allowLocal: boolean;
+  parent: ParentRuntime;
+}): RuntimePlanResult {
+  const requested =
+    input.requestedMode ??
+    (input.hasWorkingDir ? "local_repo" : "new_worktree");
+  const wantsContainer = isContainerWorkspaceMode(requested);
+
+  if (input.server === "host_only") {
+    return wantsContainer
+      ? { ok: false, refusal: "docker_unavailable" }
+      : hostPlan(requested, undefined);
+  }
+  if (input.parent === "container") {
+    return { ok: false, refusal: "docker_parent" };
+  }
+  if (input.server === "docker_only") {
+    return input.parent === "none"
+      ? DOCKER_PLAN
+      : { ok: false, refusal: "docker_parent" };
+  }
+  if (wantsContainer) {
+    return input.parent === "none"
+      ? DOCKER_PLAN
+      : { ok: false, refusal: "docker_parent" };
+  }
+  if (input.allowLocal) return hostPlan(requested, "local");
+  return input.parent === "none"
+    ? DOCKER_PLAN
+    : { ok: false, refusal: "local_disallowed" };
 }
 
 export function readStoredLocalWorkspaceMode(): WorkspaceMode {

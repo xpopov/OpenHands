@@ -19,7 +19,11 @@ import {
   setStoredConversationMetadata,
 } from "#/api/conversation-metadata-store";
 import type { Backend } from "#/api/backend-registry/types";
-import { clearCachedAgentServerInfo } from "#/api/agent-server-compatibility";
+import {
+  AgentServerUnavailableError,
+  clearCachedAgentServerInfo,
+} from "#/api/agent-server-compatibility";
+import { ConversationRuntimePolicyError } from "#/utils/workspace-mode";
 import AgentServerConversationService from "#/api/conversation-service/agent-server-conversation-service.api";
 import HooksService from "#/api/hooks-service";
 import LLMSubscriptionService from "#/api/llm-subscription-service";
@@ -158,6 +162,37 @@ const makeDirectConversation = (
   workspace: { working_dir: "/workspace/project/agent-canvas" },
   ...overrides,
 });
+
+const HYBRID_SERVER_INFO = {
+  version: "1.54.0",
+  conversation_runtime: "docker",
+  available_conversation_runtimes: ["local", "docker"],
+};
+const DOCKER_ONLY_SERVER_INFO = {
+  version: "1.54.0",
+  conversation_runtime: "docker",
+  available_conversation_runtimes: [],
+};
+
+function useServerInfo(info: Record<string, unknown>) {
+  server.use(http.get("*/server_info", () => HttpResponse.json(info)));
+  clearCachedAgentServerInfo();
+}
+
+function mockLocalCreate(id = "ignored-server-id") {
+  mockGetSettings.mockResolvedValue({
+    agent_settings: { llm: { model: "gpt-4o" } },
+    conversation_settings: {},
+  });
+  mockGetSettingsForConversation.mockResolvedValue({
+    agentSettings: { llm: { model: "gpt-4o" } },
+    conversationSettings: {},
+    secretsEncrypted: true,
+  });
+  mockHttpPost.mockResolvedValue({
+    data: { id, created_at: "2024-01-01", updated_at: "2024-01-01" },
+  });
+}
 
 const message = {
   role: "user" as const,
@@ -943,6 +978,7 @@ describe("AgentServerConversationService", () => {
     });
 
     it("asks for the docker runtime in docker-container mode", async () => {
+      useServerInfo(HYBRID_SERVER_INFO);
       const loadWorkspaceHooks = vi.spyOn(HooksService, "loadWorkspaceHooks");
       mockGetSettings.mockResolvedValue({
         agent_settings: { llm: { model: "gpt-4o" } },
@@ -981,6 +1017,7 @@ describe("AgentServerConversationService", () => {
     });
 
     it("records a docker conversation started without a workspace", async () => {
+      useServerInfo(HYBRID_SERVER_INFO);
       mockGetSettings.mockResolvedValue({
         agent_settings: { llm: { model: "gpt-4o" } },
         conversation_settings: {},
@@ -1045,6 +1082,166 @@ describe("AgentServerConversationService", () => {
 
       const [payloadCall] = mockHttpPost.mock.calls;
       expect(payloadCall[1]).toMatchObject({ conversation_runtime: "local" });
+    });
+    describe("runtime policy", () => {
+      const postedBody = () =>
+        mockHttpPost.mock.calls[0][1] as {
+          workspace: { working_dir: string };
+          worktree: boolean;
+          conversation_runtime?: string;
+          tags?: Record<string, string>;
+        };
+      const parentConversation = (tags?: Record<string, string>) =>
+        mockHttpGet.mockResolvedValue({
+          data: [makeDirectConversation({ id: "parent", tags })],
+        });
+      const expectRefusal = async (start: Promise<unknown>, code: string) => {
+        await expect(start).rejects.toBeInstanceOf(
+          ConversationRuntimePolicyError,
+        );
+        await expect(start).rejects.toMatchObject({ code });
+        expect(mockHttpPost).not.toHaveBeenCalled();
+      };
+
+      beforeEach(() => {
+        window.localStorage.clear();
+        mockLocalCreate();
+      });
+
+      it.each([undefined, "new_worktree"] as const)(
+        "starts Docker without a worktree on a Docker-only server (mode %s)",
+        async (workspaceMode) => {
+          useServerInfo(DOCKER_ONLY_SERVER_INFO);
+          await AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workspaceMode,
+          });
+          expect(postedBody()).toMatchObject({
+            worktree: false,
+            conversation_runtime: "docker",
+            workspace: { working_dir: "/workspace" },
+          });
+        },
+      );
+
+      it("refuses a child of a stored Docker parent", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        setStoredConversationMetadata("parent", {
+          selected_repository: null,
+          selected_branch: null,
+          git_provider: null,
+          workspace_mode: "docker_container",
+        });
+        parentConversation();
+        await expectRefusal(
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride: "/Users/jane/projects/foo",
+            parentConversationId: "parent",
+          }),
+          "docker_parent",
+        );
+      });
+
+      it("refuses a child of a parent tagged Docker in another browser", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        parentConversation({ workspacemode: "docker_container" });
+        await expectRefusal(
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride: "/Users/jane/projects/foo",
+            parentConversationId: "parent",
+          }),
+          "docker_parent",
+        );
+      });
+
+      it("starts a child of a host parent on the local runtime", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        parentConversation();
+        await AgentServerConversationService.createConversation({
+          agentProfileId: "profile-1",
+          workingDirOverride: "/Users/jane/projects/foo",
+          workspaceMode: "new_worktree",
+          parentConversationId: "parent",
+        });
+        expect(postedBody()).toMatchObject({
+          worktree: true,
+          conversation_runtime: "local",
+        });
+      });
+
+      it("refuses any child on a Docker-only server", async () => {
+        useServerInfo(DOCKER_ONLY_SERVER_INFO);
+        await expectRefusal(
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+            workingDirOverride: "/workspace",
+            parentConversationId: "parent",
+          }),
+          "docker_parent",
+        );
+      });
+
+      it("fails closed when server_info cannot be read", async () => {
+        server.use(http.get("*/server_info", () => HttpResponse.error()));
+        clearCachedAgentServerInfo();
+        await expect(
+          AgentServerConversationService.createConversation({
+            agentProfileId: "profile-1",
+          }),
+        ).rejects.toBeInstanceOf(AgentServerUnavailableError);
+        expect(mockHttpPost).not.toHaveBeenCalled();
+      });
+
+      it("tags container starts with their mode and host starts not at all", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        await AgentServerConversationService.createConversation({
+          agentProfileId: "profile-1",
+          workspaceMode: "docker_container",
+        });
+        await AgentServerConversationService.createConversation({
+          agentProfileId: "profile-1",
+          workingDirOverride: "/Users/jane/projects/foo",
+          workspaceMode: "local_repo",
+        });
+        const [containerCall, hostCall] = mockHttpPost.mock.calls;
+        expect(containerCall[1].tags).toMatchObject({
+          workspacemode: "docker_container",
+        });
+        expect(hostCall[1].tags?.workspacemode).toBeUndefined();
+      });
+
+      it("refuses a planner for a Docker parent", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        parentConversation({ workspacemode: "docker_container" });
+        await expectRefusal(
+          AgentServerConversationService.createLocalPlanningConversation(
+            "parent",
+          ),
+          "docker_parent",
+        );
+      });
+
+      it("starts a planner for a host parent on the local runtime", async () => {
+        useServerInfo(HYBRID_SERVER_INFO);
+        parentConversation();
+        await AgentServerConversationService.createLocalPlanningConversation(
+          "parent",
+        );
+        expect(postedBody().conversation_runtime).toBe("local");
+      });
+
+      it("refuses a planner on a Docker-only server", async () => {
+        useServerInfo(DOCKER_ONLY_SERVER_INFO);
+        parentConversation();
+        await expectRefusal(
+          AgentServerConversationService.createLocalPlanningConversation(
+            "parent",
+          ),
+          "docker_parent",
+        );
+      });
     });
   });
 

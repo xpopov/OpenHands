@@ -1,7 +1,7 @@
 import i18n from "#/i18n";
 import { I18nKey } from "#/i18n/declaration";
 import AgentServerGitService from "#/api/git-service/agent-server-git-service.api";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { server } from "#/mocks/node";
 import {
@@ -10,7 +10,13 @@ import {
 } from "#/api/backend-registry/active-store";
 import { clearCachedAgentServerInfo } from "#/api/agent-server-compatibility";
 import { clearAgentServerHomeDirCache } from "#/api/agent-server-home";
-import { resolveNewConversationWorkspace } from "#/api/conversation-workspace";
+import {
+  requireConversationServerInfo,
+  resolveNewConversationWorkspace,
+} from "#/api/conversation-workspace";
+import SettingsService from "#/api/settings-service/settings-service.api";
+import type { Settings } from "#/types/settings";
+import { ConversationRuntimePolicyError } from "#/utils/workspace-mode";
 import AgentServerConversationService from "#/api/conversation-service/agent-server-conversation-service.api";
 import AgentServerRuntimeService from "#/api/runtime-service/agent-server-runtime-service";
 
@@ -19,6 +25,22 @@ const cid = "11111111-1111-4111-8111-111111111111";
 const paths: string[] = [];
 let isolated = true;
 let capabilities = true;
+
+const resolveWorkspace = async (
+  options: Omit<
+    Parameters<typeof resolveNewConversationWorkspace>[0],
+    "conversationId" | "info"
+  >,
+) =>
+  resolveNewConversationWorkspace({
+    conversationId: cid,
+    info: await requireConversationServerInfo(),
+    ...options,
+  });
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 beforeEach(() => {
   isolated = true;
@@ -100,13 +122,10 @@ describe("conversation runtime boundaries", () => {
   });
 
   it("uses a new isolated workspace without reading host home or hooks", async () => {
-    expect(
-      await resolveNewConversationWorkspace({ conversationId: cid }),
-    ).toEqual({
+    expect(await resolveWorkspace({})).toEqual({
       workingDir: "/workspace",
       hooksProjectDir: null,
       isolated: true,
-      runtimeSelectable: false,
     });
     expect(paths).toEqual(["/server_info"]);
   });
@@ -121,17 +140,16 @@ describe("conversation runtime boundaries", () => {
   it.each(["/home/user/project", "/workspace", "relative/project"])(
     "rejects selected host folder %s rather than discarding it",
     async (workingDir) => {
-      await expect(
-        resolveNewConversationWorkspace({ conversationId: cid, workingDir }),
-      ).rejects.toThrow(i18n.t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE));
+      await expect(resolveWorkspace({ workingDir })).rejects.toThrow(
+        i18n.t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE),
+      );
       expect(paths).toEqual(["/server_info"]);
     },
   );
 
   it("rejects selected host repository metadata", async () => {
     await expect(
-      resolveNewConversationWorkspace({
-        conversationId: cid,
+      resolveWorkspace({
         selectedRepository: "owner/project",
       }),
     ).rejects.toThrow(i18n.t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE));
@@ -146,8 +164,7 @@ describe("conversation runtime boundaries", () => {
     try {
       await i18n.changeLanguage("fr");
       await expect(
-        resolveNewConversationWorkspace({
-          conversationId: cid,
+        resolveWorkspace({
           selectedRepository: "owner/project",
         }),
       ).rejects.toThrow(notice);
@@ -156,28 +173,33 @@ describe("conversation runtime boundaries", () => {
     }
   });
 
-  it("preserves a Docker child conversation's parent workspace", async () => {
+  it("refuses a child on a Docker-only server", async () => {
+    vi.spyOn(SettingsService, "getSettings").mockResolvedValue({} as Settings);
+    const start = AgentServerConversationService.createConversation({
+      agentProfileId: "profile-1",
+      workingDirOverride: "/workspace",
+      parentConversationId: "parent",
+    });
+    await expect(start).rejects.toBeInstanceOf(ConversationRuntimePolicyError);
+    await expect(start).rejects.toMatchObject({
+      code: "docker_parent",
+      message: i18n.t(I18nKey.CONVERSATION$DOCKER_PARENT_UNSUPPORTED),
+    });
     expect(
-      await resolveNewConversationWorkspace({
-        conversationId: cid,
-        parentConversationId: "parent",
-        workingDir: "/workspace",
-      }),
-    ).toMatchObject({ workingDir: "/workspace", isolated: true });
+      paths.filter((path) => path.startsWith("/api/conversations")),
+    ).toEqual([]);
   });
 
   it("uses host metadata rather than runtime_services deployment mode", async () => {
     isolated = false;
     expect(
-      await resolveNewConversationWorkspace({
-        conversationId: cid,
+      await resolveWorkspace({
         workingDir: "/home/user/project",
       }),
     ).toEqual({
       workingDir: "/home/user/project",
       hooksProjectDir: "/home/user/project",
       isolated: false,
-      runtimeSelectable: false,
     });
   });
 

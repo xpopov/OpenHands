@@ -1,5 +1,9 @@
 import { Provider } from "#/types/settings";
 import type { PluginSpec } from "#/api/conversation-service/agent-server-conversation-service.types";
+import {
+  isWorkspaceMode,
+  WORKSPACE_MODE_TAG_KEY,
+} from "#/utils/workspace-mode";
 
 const STORAGE_KEY = "openhands-agent-server-conversation-metadata";
 
@@ -118,6 +122,20 @@ export const mergeStoredConversationMetadata = (
     ...(getStoredConversationMetadata(conversationId) ?? {}),
     ...patch,
   });
+};
+
+/**
+ * A conversation's workspace mode: this browser's record, else the
+ * `workspacemode` tag stamped on container conversations at start.
+ */
+export const getConversationWorkspaceMode = (
+  conversationId: string,
+  tags?: Record<string, string> | null,
+): WorkspaceMode | null => {
+  const stored = getStoredConversationMetadata(conversationId)?.workspace_mode;
+  if (stored) return stored;
+  const tagged = tags?.[WORKSPACE_MODE_TAG_KEY];
+  return isWorkspaceMode(tagged) ? tagged : null;
 };
 
 export const removeStoredConversationMetadata = (

@@ -6,7 +6,8 @@ import { useCreateConversation } from "#/hooks/mutation/use-create-conversation"
 import { useIsCreatingConversation } from "#/hooks/use-is-creating-conversation";
 import { useNavigation } from "#/context/navigation-context";
 import { useActiveConversation } from "#/hooks/query/use-active-conversation";
-import { getStoredConversationMetadata } from "#/api/conversation-metadata-store";
+import { getConversationWorkspaceMode } from "#/api/conversation-metadata-store";
+import { isContainerWorkspaceMode } from "#/utils/workspace-mode";
 import { useActiveBackend } from "#/contexts/active-backend-context";
 import { displayErrorToast } from "#/utils/custom-toast-handlers";
 
@@ -36,8 +37,9 @@ export function SkillInstallRestartBanner({
   // skill sits in a private workspace a new conversation would not get.
   const inContainer =
     !!conversationId &&
-    getStoredConversationMetadata(conversationId)?.workspace_mode ===
-      "docker_container";
+    isContainerWorkspaceMode(
+      getConversationWorkspaceMode(conversationId, conversation?.tags),
+    );
   const hostFolder = conversation?.selected_workspace ?? undefined;
 
   // Local-only: the cloud create path ignores workingDir entirely.

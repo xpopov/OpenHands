@@ -5,7 +5,9 @@ import {
   getAgentServerClientOptions,
   type AgentServerClientOverrides,
 } from "./agent-server-client-options";
+import type { ServerRuntimes } from "#/utils/workspace-mode";
 import {
+  AgentServerUnavailableError,
   getCachedAgentServerInfo,
   type AgentServerInfo,
 } from "./agent-server-compatibility";
@@ -52,31 +54,38 @@ export async function getConversationServerInfo(
   }
 }
 
+export function getServerRuntimes(
+  info: AgentServerInfo | null | undefined,
+): ServerRuntimes {
+  if (usesIsolatedWorkspace(info)) return "docker_only";
+  if (supportsDockerConversations(info)) return "hybrid";
+  return "host_only";
+}
+
+/** Start paths fail closed: without `server_info` the runtime is unknown. */
+export async function requireConversationServerInfo(): Promise<AgentServerInfo> {
+  const info = await getConversationServerInfo();
+  if (!info) throw new AgentServerUnavailableError();
+  return info;
+}
+
 export async function resolveNewConversationWorkspace(options: {
   conversationId: string;
+  info: AgentServerInfo;
   workingDir?: string;
   selectedRepository?: string | null;
-  parentConversationId?: string;
   inContainer?: boolean;
 }) {
   const clientOptions = getAgentServerClientOptions();
-  const info = await getConversationServerInfo(clientOptions);
+  const { info } = options;
   if (usesIsolatedWorkspace(info)) {
-    if (
-      options.selectedRepository ||
-      (options.workingDir !== undefined &&
-        !(
-          options.parentConversationId &&
-          options.workingDir === ISOLATED_WORKSPACE_DIR
-        ))
-    ) {
+    if (options.selectedRepository || options.workingDir !== undefined) {
       throw new Error(i18n.t(I18nKey.HOME$ISOLATED_WORKSPACE_NOTICE));
     }
     return {
       workingDir: ISOLATED_WORKSPACE_DIR,
       hooksProjectDir: null,
       isolated: true,
-      runtimeSelectable: false,
     };
   }
   // @spec WUP-001 — Resolve relative local defaults against the backend home.
@@ -95,7 +104,6 @@ export async function resolveNewConversationWorkspace(options: {
     workingDir,
     hooksProjectDir,
     isolated: false,
-    runtimeSelectable: supportsDockerConversations(info),
   };
 }
 

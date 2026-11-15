@@ -6,6 +6,7 @@ import {
 } from "@openhands/typescript-client/clients";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { __resetActiveStoreForTests } from "#/api/backend-registry/active-store";
+import { clearCachedAgentServerInfo } from "#/api/agent-server-compatibility";
 import AgentServerConversationService from "#/api/conversation-service/agent-server-conversation-service.api";
 import {
   getStoredConversationMetadata,
@@ -28,6 +29,7 @@ const {
   mockListProfiles,
   mockGetTelemetryDistinctId,
   mockLoadHooks,
+  mockGetServerInfo,
 } = vi.hoisted(() => ({
   mockHttpGet: vi.fn(),
   mockHttpPost: vi.fn(),
@@ -44,6 +46,7 @@ const {
   mockListProfiles: vi.fn(),
   mockGetTelemetryDistinctId: vi.fn(),
   mockLoadHooks: vi.fn(),
+  mockGetServerInfo: vi.fn(),
 }));
 
 const originalFetch = global.fetch;
@@ -76,6 +79,9 @@ vi.mock("@openhands/typescript-client/clients", async () => {
     }),
     HooksClient: vi.fn(function HooksClientMock() {
       return { loadHooks: mockLoadHooks };
+    }),
+    ServerClient: vi.fn(function ServerClientMock() {
+      return { getServerInfo: mockGetServerInfo };
     }),
   };
 });
@@ -122,6 +128,8 @@ describe("AgentServerConversationService", () => {
     mockSwitchLLM.mockReset();
     fetchMock.mockReset();
     global.fetch = originalFetch;
+    mockGetServerInfo.mockReset().mockResolvedValue({ version: "1.54.0" });
+    clearCachedAgentServerInfo();
     vi.mocked(ConversationClient).mockClear();
     vi.mocked(FileClient).mockClear();
     vi.mocked(ProfilesClient).mockClear();
