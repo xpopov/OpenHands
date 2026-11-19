@@ -147,9 +147,18 @@ export const shouldRenderEvent = (event: OpenHandsEvent) => {
     return true;
   }
 
-  // Render hook execution events
+  // A hook that passed without output only adds an "ok" row per tool call
+  // (one per configured hook); it stays in the event stream. Blocked or failed
+  // hooks and hooks that return output or context still render.
   if (isHookExecutionEvent(event)) {
-    return true;
+    return !(
+      event.success &&
+      !event.blocked &&
+      !event.error &&
+      !event.stdout &&
+      !event.stderr &&
+      !event.additional_context
+    );
   }
 
   // Render ACP sub-agent tool call events at every lifecycle stage. The SDK
