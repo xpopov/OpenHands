@@ -12,6 +12,7 @@ import { ACPToolCallEvent } from "#/types/agent-server/core/events/acp-tool-call
 import { StreamingDeltaEvent } from "#/types/agent-server/core/events/streaming-delta-event";
 import {
   ActionEvent,
+  HookExecutionEvent,
   ObservationEvent,
   OpenHandsEvent,
   SecurityRisk,
@@ -285,5 +286,52 @@ describe("shouldRenderEvent - /goal loop re-prompts", () => {
     `${SECRET_REQUEST_RESULT_PREFIX}{"status":"saved","name":"GITHUB_TOKEN"}`,
   ])("hides the client tool result the frontend posts back: %s", (text) => {
     expect(shouldRenderEvent(makeUserMessage(text))).toBe(false);
+  });
+});
+
+describe("shouldRenderEvent - hook executions", () => {
+  const makeHookEvent = (
+    overrides: Partial<HookExecutionEvent> = {},
+  ): HookExecutionEvent => ({
+    id: "hook-1",
+    timestamp: "2024-01-01T00:00:00Z",
+    source: "hook",
+    kind: "HookExecutionEvent",
+    hook_event_type: "PreToolUse",
+    hook_command: ".openhands/hooks/guard.sh",
+    success: true,
+    blocked: false,
+    exit_code: 0,
+    reason: null,
+    tool_name: "terminal",
+    action_id: "a1",
+    message_id: null,
+    stdout: "",
+    stderr: "",
+    error: null,
+    additional_context: null,
+    hook_input: null,
+    ...overrides,
+  });
+
+  it("hides a hook that passed without output", () => {
+    expect(shouldRenderEvent(makeHookEvent())).toBe(false);
+    expect(
+      shouldRenderEvent(makeHookEvent({ stdout: null, stderr: null })),
+    ).toBe(false);
+  });
+
+  it.each<[string, Partial<HookExecutionEvent>]>([
+    ["blocked", { blocked: true, success: false, reason: "denied" }],
+    ["failed", { success: false, exit_code: 1 }],
+    ["error", { error: "timed out" }],
+    ["stdout", { stdout: '{"decision":"allow"}' }],
+    ["stderr", { stderr: "warning" }],
+    [
+      "additional context",
+      { hook_event_type: "UserPromptSubmit", additional_context: "Hub: x" },
+    ],
+  ])("renders a hook with %s", (_label, overrides) => {
+    expect(shouldRenderEvent(makeHookEvent(overrides))).toBe(true);
   });
 });
