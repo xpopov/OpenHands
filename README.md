@@ -33,6 +33,54 @@
 > - Folder hooks run inside the container, not on the host. They fail open: only exit code 2 blocks an action; a missing script or interpreter in the container (exit 127) lets the action proceed.
 > - Any absolute host path can be mounted, including `/` or `~/.ssh`; the folder picker is the only guard (as upstream).
 
+## OpenHands (Canvas and Agent Server) updates on DigitalOcean installation
+
+Add or update these values in the environment configuration used by the `openhands` service:
+
+```dotenv
+# Installed Agent Canvas version
+OPENHANDS_VERSION=1.34.0
+
+OH_AGENT_SERVER_VERSION=1.62.0
+# Local agent-server
+OH_AGENT_SERVER_LOCAL_PATH=/home/openhands/software-agent-sdk
+
+OH_CONVERSATION_RUNTIME_SELECTABLE=true
+OH_CONVERSATION_IMAGE=hub-openhands-agent:latest # custom Docker image
+
+# Give conversation containers more memory and CPU
+OH_CONVERSATION_CONTAINER_MEMORY=3g
+OH_CONVERSATION_CONTAINER_CPUS=2.0
+```
+
+Optional explicit workspace mount (installation-specific; not assumed to be the default):
+
+```dotenv
+OH_EXECUTION_VOLUMES='["/home/openhands/workspace/project:/workspace/project"]'
+```
+
+Ensure the custom conversation image's Dockerfile includes:
+
+```dockerfile
+ENV LITELLM_MODEL_COST_MAP_URL=https://129.212.148.213/litellm/model_prices_and_context_window.json
+```
+
+For the initial setup, clone both forks as the `openhands` user into the paths used below (run once):
+
+```sh
+sudo -u openhands -i bash -c 'git clone https://github.com/xpopov/OpenHands.git ~/agent-canvas-fork'
+sudo -u openhands -i bash -c 'git clone https://github.com/xpopov/software-agent-sdk.git ~/software-agent-sdk'
+```
+
+With Canvas in `/home/openhands/agent-canvas-fork` and the Agent Server SDK in `/home/openhands/software-agent-sdk`, update and rebuild Canvas, update the SDK, then restart the service:
+
+```sh
+sudo -u openhands -i bash -c 'cd ~/agent-canvas-fork && git pull && npm ci --no-audit --no-fund && npm run build && npm pack && npm install -g --prefix ~/.local ./openhands-agent-canvas-1.34.0.tgz'
+
+sudo -u openhands -i bash -c 'cd ~/software-agent-sdk && git pull'
+sudo systemctl restart openhands
+```
+
 <a name="readme-top"></a>
 
 <div align="center">
