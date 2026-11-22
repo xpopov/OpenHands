@@ -46,7 +46,7 @@ OH_AGENT_SERVER_VERSION=1.62.0
 OH_AGENT_SERVER_LOCAL_PATH=/home/openhands/software-agent-sdk
 
 OH_CONVERSATION_RUNTIME_SELECTABLE=true
-OH_CONVERSATION_IMAGE=hub-openhands-agent:latest # custom Docker image
+OH_CONVERSATION_IMAGE=rails-openhands-agent:latest # custom Docker image
 
 # Give conversation containers more memory and CPU
 OH_CONVERSATION_CONTAINER_MEMORY=3g
