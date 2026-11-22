@@ -46,7 +46,7 @@ OH_AGENT_SERVER_VERSION=1.62.0
 OH_AGENT_SERVER_LOCAL_PATH=/home/openhands/software-agent-sdk
 
 OH_CONVERSATION_RUNTIME_SELECTABLE=true
-OH_CONVERSATION_IMAGE=hub-openhands-agent:latest # custom Docker image
+OH_CONVERSATION_IMAGE=rails-openhands-agent:latest # custom Docker image
 
 # Give conversation containers more memory and CPU
 OH_CONVERSATION_CONTAINER_MEMORY=3g
@@ -72,7 +72,10 @@ sudo -u openhands -i bash -c 'git clone https://github.com/xpopov/OpenHands.git 
 sudo -u openhands -i bash -c 'git clone https://github.com/xpopov/software-agent-sdk.git ~/software-agent-sdk'
 ```
 
-With Canvas in `/home/openhands/agent-canvas-fork` and the Agent Server SDK in `/home/openhands/software-agent-sdk`, update and rebuild Canvas, then update the SDK:
+> [!IMPORTANT]
+> Before pulling the source updates below, rebuild `rails-openhands-agent:latest` with the Agent Server version you are upgrading to. The Docker image takes longer to build, so prepare it first. Keep the host Agent Server and the image's Agent Server/SDK versions aligned: an older image can reject newer settings with HTTP 422 (`Conversation runtime rejected the request`).
+
+With the rebuilt image ready, Canvas in `/home/openhands/agent-canvas-fork` and the Agent Server SDK in `/home/openhands/software-agent-sdk`, update and rebuild Canvas, then update the SDK:
 
 ```sh
 sudo -u openhands -i bash -c 'cd ~/agent-canvas-fork && git pull && npm ci --no-audit --no-fund && npm run build && npm pack && npm install -g --prefix ~/.local ./openhands-agent-canvas-1.34.0.tgz'
