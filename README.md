@@ -72,12 +72,30 @@ sudo -u openhands -i bash -c 'git clone https://github.com/xpopov/OpenHands.git 
 sudo -u openhands -i bash -c 'git clone https://github.com/xpopov/software-agent-sdk.git ~/software-agent-sdk'
 ```
 
-With Canvas in `/home/openhands/agent-canvas-fork` and the Agent Server SDK in `/home/openhands/software-agent-sdk`, update and rebuild Canvas, update the SDK, then restart the service:
+With Canvas in `/home/openhands/agent-canvas-fork` and the Agent Server SDK in `/home/openhands/software-agent-sdk`, update and rebuild Canvas, then update the SDK:
 
 ```sh
 sudo -u openhands -i bash -c 'cd ~/agent-canvas-fork && git pull && npm ci --no-audit --no-fund && npm run build && npm pack && npm install -g --prefix ~/.local ./openhands-agent-canvas-1.34.0.tgz'
 
 sudo -u openhands -i bash -c 'cd ~/software-agent-sdk && git pull'
+```
+
+Before restarting, edit the service unit:
+
+```sh
+sudo systemctl edit --full openhands
+```
+
+Replace the existing `ExecStart` line in the `[Service]` section with:
+
+```ini
+ExecStart=/home/openhands/agent-canvas-fork/bin/agent-canvas.mjs --public
+```
+
+Save the unit, reload systemd's unit configuration, and only then restart the service:
+
+```sh
+sudo systemctl daemon-reload
 sudo systemctl restart openhands
 ```
 
