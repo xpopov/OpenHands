@@ -85,7 +85,9 @@ sudo -u openhands -i bash -c 'cd ~/agent-canvas-fork && git checkout main && git
 sudo -u openhands -i bash -c 'cd ~/software-agent-sdk && git pull'
 ```
 
-Before restarting, edit the service unit:
+`npm install -g --prefix ~/.local` installs the package under `~/.local/lib/node_modules/@openhands/agent-canvas` and links the `agent-canvas` command to `/home/openhands/.local/bin/agent-canvas`. The service must run that command; the checkout itself only has `bin/agent-canvas.mjs`.
+
+Before the first restart, edit the service unit (once; later updates keep it):
 
 ```sh
 sudo systemctl edit --full openhands
@@ -94,7 +96,7 @@ sudo systemctl edit --full openhands
 Replace the existing `ExecStart` line in the `[Service]` section with:
 
 ```ini
-ExecStart=/home/openhands/agent-canvas-fork/bin/agent-canvas.mjs --public
+ExecStart=/home/openhands/.local/bin/agent-canvas --public
 ```
 
 Save the unit, reload systemd's unit configuration, and only then restart the service:
