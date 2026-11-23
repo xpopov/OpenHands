@@ -1,7 +1,7 @@
 > [!NOTE]
-> **Fork of [OpenHands/OpenHands](https://github.com/OpenHands/OpenHands) (Agent Canvas v1.34.0): Docker conversations can use host folders, a new Docker Worktree mode, and an "Allow local conversations" setting.**
+> **Fork of [OpenHands/OpenHands](https://github.com/OpenHands/OpenHands) (Agent Canvas v1.34.0): Docker conversations can use host folders, a new Docker Worktree mode, an "Allow local conversations" setting, and the chat hides hook runs that passed silently.**
 >
-> Branch `fix/canvas-docker-host-workspace-v1.34.0` (base tag `v1.34.0`). The older `fix/canvas-docker-host-workspace-v1.29.0` branch carries the first version of the host-folder change.
+> Build from `main` (base tag `v1.34.0`). It contains every fork change: the host-folder work of `fix/canvas-docker-host-workspace-v1.34.0` (PR #2) and later PRs such as the hook-row filter (PR #3). The `fix/...` branches are not updated after they merge, so a checkout left on one of them stays behind `main` on `git pull`. The older `fix/canvas-docker-host-workspace-v1.29.0` branch carries the first version of the host-folder change.
 >
 > **Workspace modes in the home launcher**
 >
@@ -26,6 +26,8 @@
 > **Children and planners**: a child or planner of a Docker conversation (or any conversation on a Docker-only server) is refused, so it can never move to the host. A child or planner of a host conversation is refused while local conversations are off.
 >
 > **Worktree options**: the saved `worktree_base`, `worktree_base_ref` and `worktree_branch_prefix` also apply to Docker Worktree. They are hidden in Settings > Runtime while local conversations are off.
+>
+> **Hook rows in the chat**: a hook run that passed, was not blocked and returned no stdout, stderr, error or additional context is not shown (each `PreToolUse` hook otherwise adds an `ok` row per tool call). The event stays in the event stream; transcript exports skip it too. Blocked or failed hooks and hooks with output or context still show.
 >
 > **Security trade-offs**
 >
@@ -78,7 +80,7 @@ sudo -u openhands -i bash -c 'git clone https://github.com/xpopov/software-agent
 With the rebuilt image ready, Canvas in `/home/openhands/agent-canvas-fork` and the Agent Server SDK in `/home/openhands/software-agent-sdk`, update and rebuild Canvas, then update the SDK:
 
 ```sh
-sudo -u openhands -i bash -c 'cd ~/agent-canvas-fork && git pull && npm ci --no-audit --no-fund && npm run build && npm pack && npm install -g --prefix ~/.local ./openhands-agent-canvas-1.34.0.tgz'
+sudo -u openhands -i bash -c 'cd ~/agent-canvas-fork && git checkout main && git pull && npm ci --no-audit --no-fund && npm run build && npm pack && npm install -g --prefix ~/.local ./openhands-agent-canvas-1.34.0.tgz'
 
 sudo -u openhands -i bash -c 'cd ~/software-agent-sdk && git pull'
 ```
