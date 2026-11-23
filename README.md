@@ -106,6 +106,8 @@ sudo systemctl daemon-reload
 sudo systemctl restart openhands
 ```
 
+After the restart, hard-refresh open Canvas tabs (Ctrl+Shift+R, or Cmd+Shift+R on macOS). Otherwise the browser keeps running the previous frontend bundle and frontend changes do not show.
+
 <a name="readme-top"></a>
 
 <div align="center">
